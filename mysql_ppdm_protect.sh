@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
 
 ########################################
@@ -40,8 +40,10 @@ MYSQLDUMP_BIN="/usr/bin/mysqldump"
 ########################################
 
 usage() {
-  echo "Usage: $0 [-h host] [-P port] [-u user] [-p password] [-s socket] [-d backup_dir] [-D database1,database2,...]"
+  echo "Usage: $0 [-h host] [-P port] [-u user] [-p password] [-s socket] [-d backup_dir] [-D database1,database2,...] [-j jobs] [-f]"
   echo "  -D: Specify one or more databases to backup (comma-separated). If not specified, all databases are backed up."
+  echo "  -j: Requested parallel jobs for database dumps (requires -f to enable)."
+  echo "  -f: Force parallel database dumps when -j is greater than 1."
   exit 1
 }
 
@@ -49,8 +51,11 @@ CLI_USER_SET=0
 CLI_PASS_SET=0
 CLI_DIR_SET=0
 
+MAX_JOBS=1
+FORCE_PARALLEL=0
+
 SPECIFIED_DBS=()
-while getopts "h:P:u:p:s:d:D:" opt; do
+while getopts "h:P:u:p:s:d:D:j:f" opt; do
   case $opt in
     h) MYSQL_HOST="$OPTARG" ;;
     P) MYSQL_PORT="$OPTARG" ;;
@@ -61,6 +66,8 @@ while getopts "h:P:u:p:s:d:D:" opt; do
     D) IFS=',' read -ra DB_ARRAY <<< "$OPTARG"
        SPECIFIED_DBS+=("${DB_ARRAY[@]}")
        ;;
+    j) MAX_JOBS="$OPTARG" ;;
+    f) FORCE_PARALLEL=1 ;;
     *) usage ;;
   esac
 done
@@ -87,10 +94,14 @@ fi
 
 mkdir -p "$BACKUP_DIR"/logs
 
-MYSQL_OPTS=(-u"$MYSQL_USER")
-[[ -n "$MYSQL_PASSWORD" ]] && MYSQL_OPTS+=(-p"$MYSQL_PASSWORD")
-[[ -n "$MYSQL_SOCKET" ]] && MYSQL_OPTS+=(--socket="$MYSQL_SOCKET")
-[[ -z "$MYSQL_SOCKET" ]] && MYSQL_OPTS+=(-h"$MYSQL_HOST" -P"$MYSQL_PORT")
+build_mysql_opts() {
+  local -a opts
+  opts=(-u"$MYSQL_USER")
+  [[ -n "$MYSQL_PASSWORD" ]] && opts+=(-p"$MYSQL_PASSWORD")
+  [[ -n "$MYSQL_SOCKET" ]] && opts+=(--socket="$MYSQL_SOCKET")
+  [[ -z "$MYSQL_SOCKET" ]] && opts+=(-h"$MYSQL_HOST" -P"$MYSQL_PORT")
+  echo "${opts[@]}"
+}
 
 ########################################
 # FUNCTIONS
@@ -108,6 +119,14 @@ log() {
     echo "[$timestamp] [$level] $message"
   fi
 }
+
+on_error() {
+  log "ERROR" "Backup failed"
+  write_backup_response "ERROR" "Backup failed"
+  exit 1
+}
+
+trap on_error ERR
 
 write_backup_response() {
   # If BACKUP_RESPONSE_FILEPATH is provided by PPDM, write JSON response.
@@ -148,9 +167,12 @@ backup_database() {
   local db_dir="$BACKUP_DIR/dumps/$db"
   mkdir -p "$db_dir"
   local out="$db_dir/${db}_${DATE}.sql"
+  local -a opts
+  # shellcheck disable=SC2207
+  opts=($(build_mysql_opts))
   
   if "$MYSQLDUMP_BIN" \
-    "${MYSQL_OPTS[@]}" \
+    "${opts[@]}" \
     --single-transaction \
     --routines \
     --events \
@@ -162,7 +184,6 @@ backup_database() {
     else
       log "OK" "$db backed up"
     fi
-    DD_BACKUP_PATHS+=("$db_dir")
     return 0
   else
     log "ERROR" "Error backing up $db"
@@ -181,9 +202,11 @@ if [[ ${#SPECIFIED_DBS[@]} -gt 0 ]]; then
   # Validate that specified databases exist
   log "INFO" "Validating specified databases"
   ALL_DBS=()
+  # shellcheck disable=SC2207
+  ALL_OPTS=($(build_mysql_opts))
   while IFS= read -r db; do
     [[ -n "$db" ]] && ALL_DBS+=("$db")
-  done < <("$MYSQL_BIN" "${MYSQL_OPTS[@]}" -N -e "SHOW DATABASES;" 2>/dev/null || { log "ERROR" "Unable to connect to MySQL" >&2; exit 1; })
+  done < <("$MYSQL_BIN" "${ALL_OPTS[@]}" -N -e "SHOW DATABASES;" 2>/dev/null || { log "ERROR" "Unable to connect to MySQL" >&2; exit 1; })
   
   # Check if specified databases exist
   declare -A DB_MAP
@@ -207,9 +230,11 @@ if [[ ${#SPECIFIED_DBS[@]} -gt 0 ]]; then
 else
   log "INFO" "Discovering MySQL databases"
   DATABASES=()
+  # shellcheck disable=SC2207
+  DISC_OPTS=($(build_mysql_opts))
   while IFS= read -r db; do
     [[ -n "$db" ]] && DATABASES+=("$db")
-  done < <("$MYSQL_BIN" "${MYSQL_OPTS[@]}" -N -e "SHOW DATABASES;" 2>/dev/null || { log "ERROR" "Unable to connect to MySQL" >&2; exit 1; })
+  done < <("$MYSQL_BIN" "${DISC_OPTS[@]}" -N -e "SHOW DATABASES;" 2>/dev/null || { log "ERROR" "Unable to connect to MySQL" >&2; exit 1; })
   
   # Filter excluded databases
   VALID_DBS=()
@@ -223,24 +248,52 @@ else
 fi
 
 # PPDM guideline: handle unsupported backup levels gracefully with a clear message.
-if [[ -n "${BACKUP_LEVEL:-}" ]] && [[ "${BACKUP_LEVEL^^}" != "FULL" ]]; then
-  log "ERROR" "Backup level must be full. Exiting"
-  DD_BACKUP_PATHS=()
-  write_backup_response "ERROR" "Backup level must be full"
-  exit 1
+if [[ -n "${BACKUP_LEVEL:-}" ]]; then
+  LEVEL_UPPER=$(echo "$BACKUP_LEVEL" | tr '[:lower:]' '[:upper:]')
+  if [[ "$LEVEL_UPPER" != "FULL" ]]; then
+    log "ERROR" "Backup level must be full. Exiting"
+    DD_BACKUP_PATHS=()
+    write_backup_response "ERROR" "Backup level must be full"
+    exit 1
+  fi
 fi
 
 # Track backup directories for PPDM response output (folder paths only).
 DD_BACKUP_PATHS=()
+for db in "${VALID_DBS[@]}"; do
+  DD_BACKUP_PATHS+=("$BACKUP_DIR/dumps/$db")
+done
+
+# Optional parallelism (disabled unless forced).
+PARALLEL_ENABLED=0
+if [[ "$MAX_JOBS" -gt 1 && "$FORCE_PARALLEL" -eq 1 ]] && command -v xargs >/dev/null 2>&1; then
+  PARALLEL_ENABLED=1
+  if [[ -n "${DD_TARGET_DIRECTORY:-}" ]]; then
+    log "INFO" "Force parallel enabled for dumps in DD_TARGET_DIRECTORY"
+  else
+    log "INFO" "Force parallel enabled for dumps"
+  fi
+elif [[ "$MAX_JOBS" -gt 1 && "$FORCE_PARALLEL" -eq 0 ]]; then
+  log "INFO" "Parallel requested but not enabled (use -f to force)"
+fi
 
 # Sequential backup (PPDM compatible - no parallel processing)
-log "INFO" "Backing up ${#VALID_DBS[@]} databases sequentially"
 FAILED=0
-for db in "${VALID_DBS[@]}"; do
-  if ! backup_database "$db"; then
+if [[ "$PARALLEL_ENABLED" -eq 1 ]]; then
+  log "INFO" "Backing up ${#VALID_DBS[@]} databases with xargs (${MAX_JOBS} jobs)"
+  export -f backup_database log build_mysql_opts
+  export MYSQLDUMP_BIN BACKUP_DIR DATE COMPRESS MYSQL_USER MYSQL_PASSWORD MYSQL_SOCKET MYSQL_HOST MYSQL_PORT
+  if ! printf '%s\0' "${VALID_DBS[@]}" | xargs -0 -n1 -P"$MAX_JOBS" bash -c 'backup_database "$1"' _; then
     FAILED=1
   fi
-done
+else
+  log "INFO" "Backing up ${#VALID_DBS[@]} databases sequentially"
+  for db in "${VALID_DBS[@]}"; do
+    if ! backup_database "$db"; then
+      FAILED=1
+    fi
+  done
+fi
 if [[ $FAILED -ne 0 ]]; then
   write_backup_response "ERROR" "Backup failed"
   exit 1
@@ -300,3 +353,5 @@ done
 ########################################
 
 log "OK" "MySQL backup completed: $BACKUP_DIR"
+
+exit 0

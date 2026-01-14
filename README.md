@@ -74,6 +74,12 @@ Run it manually (typical local test):
 ./mysql_ppdm_protect.sh -h localhost -u root -d /tmp/mysql-backups -D mydb
 ```
 
+Force parallel database dumps (use with care):
+
+```bash
+./mysql_ppdm_protect.sh -D mydb1,mydb2 -j 4 -f
+```
+
 Emulate a PPDM-style run (example):
 
 ```bash
@@ -83,7 +89,7 @@ export ASSET_PASSWORD=''
 export BACKUP_LEVEL=FULL
 export BACKUP_RESPONSE_FILEPATH=/tmp/ppdm-backup-response.json
 export TRACE_ID=example-trace-id
-./mysql_ppdm_protect.sh -D mydb
+./mysql_ppdm_protect.sh -D mydb -j 4 -f
 cat /tmp/ppdm-backup-response.json
 ```
 
