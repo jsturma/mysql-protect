@@ -55,6 +55,38 @@ This will use default settings:
 - Backup all databases (excluding system databases: information_schema, performance_schema, mysql, sys)
 - Use `-D` option to backup specific databases only
 
+### Dell PPDM Generic Application Agent usage
+
+This repo includes a PPDM-focused variant:
+
+- **`mysql_ppdm_protect.sh`**: optimized for Dell PowerProtect Data Manager Generic Application Agent scripting (sequential backups, no parallelization).
+
+Key behavior (when PPDM provides these exported variables):
+- **`DD_TARGET_DIRECTORY`**: if set, backups are written under this directory (PPDM target path for the job).
+- **`ASSET_USERNAME` / `ASSET_PASSWORD`**: used as defaults when `-u` / `-p` are not provided.
+- **`BACKUP_LEVEL`**: only `FULL` is supported; other values are rejected with a clear error.
+- **`BACKUP_RESPONSE_FILEPATH`**: if set, the script writes a JSON response containing `ddBackupPath` (folder paths only) and an error message on failure.
+- **`TRACE_ID`**: included in log output when present.
+
+Run it manually (typical local test):
+
+```bash
+./mysql_ppdm_protect.sh -h localhost -u root -d /tmp/mysql-backups -D mydb
+```
+
+Emulate a PPDM-style run (example):
+
+```bash
+export DD_TARGET_DIRECTORY=/tmp/ppdm-target
+export ASSET_USERNAME=root
+export ASSET_PASSWORD=''
+export BACKUP_LEVEL=FULL
+export BACKUP_RESPONSE_FILEPATH=/tmp/ppdm-backup-response.json
+export TRACE_ID=example-trace-id
+./mysql_ppdm_protect.sh -D mydb
+cat /tmp/ppdm-backup-response.json
+```
+
 ### Command-Line Options
 
 ```
@@ -71,6 +103,8 @@ Usage: ./mysql_parallel_protect.sh [-h host] [-P port] [-u user] [-p password] [
 | `-d` | Backup directory | `/var/backups/mysql` |
 | `-j` | Number of parallel jobs | `1` (sequential) |
 | `-D` | Specific databases to backup (comma-separated) | All databases (excluding system DBs) |
+
+`mysql_ppdm_protect.sh` supports the same options **except** `-j`.
 
 ### Examples
 

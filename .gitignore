@@ -1,6 +1,7 @@
 # Backup directories and files
 /var/backups/
 /backups/
+/docs/
 *.sql
 *.sql.gz
 *.sql.bz2
