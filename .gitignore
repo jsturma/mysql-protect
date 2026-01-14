@@ -1,0 +1,60 @@
+# Backup directories and files
+/var/backups/
+/backups/
+*.sql
+*.sql.gz
+*.sql.bz2
+*.sql.xz
+
+# Log files
+*.log
+logs/
+*.log.*
+
+# MySQL connection files (may contain passwords)
+.my.cnf
+*.cnf
+
+# OS-specific files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Editor and IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+*~
+
+# Test files
+test_*
+*_test.sh
+*.test
+
+# Environment files
+.env
+.env.local
+*.env
+
+# Compressed files
+*.zip
+*.tar
+*.tar.gz
+*.tgz
