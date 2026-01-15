@@ -1,6 +1,6 @@
 # MySQL Backup Script
 
-A robust, feature-rich bash script for backing up MySQL/MariaDB databases with support for parallel processing, compression, and comprehensive log management.
+Simple bash script for backing up MySQL/MariaDB databases with support for parallel processing, compression, and comprehensive log management.
 
 ## Features
 
@@ -110,7 +110,13 @@ Usage: ./mysql_parallel_protect.sh [-h host] [-P port] [-u user] [-p password] [
 | `-j` | Number of parallel jobs | `1` (sequential) |
 | `-D` | Specific databases to backup (comma-separated) | All databases (excluding system DBs) |
 
-`mysql_ppdm_protect.sh` supports the same options **except** `-j`.
+PPDM variant:
+
+```
+Usage: ./mysql_ppdm_protect.sh [-h host] [-P port] [-u user] [-p password] [-s socket] [-d backup_dir] [-D database1,database2,...] [-j jobs] [-f]
+```
+
+- `-j` requests parallel jobs, but **parallel is only enabled when `-f` is also provided** (otherwise it runs sequentially).
 
 ### Examples
 
