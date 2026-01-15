@@ -63,9 +63,8 @@ This repo includes a PPDM-focused variant:
 
 Key behavior (when PPDM provides these exported variables):
 - **`DD_TARGET_DIRECTORY`**: if set, backups are written under this directory (PPDM target path for the job).
-- **`ASSET_USERNAME` / `ASSET_PASSWORD`**: used as defaults when `-u` / `-p` are not provided.
+- **`ASSET_USERNAME` / `ASSET_PASSWORD`**: optional; when set, used for MySQL authentication. When not set, rely on defaults or client config (for example, `~/.my.cnf`).
 - **`BACKUP_LEVEL`**: only `FULL` is supported; other values are rejected with a clear error.
-- **`BACKUP_RESPONSE_FILEPATH`**: if set, the script writes a JSON response containing `ddBackupPath` (folder paths only) and an error message on failure.
 - **`TRACE_ID`**: included in log output when present.
 
 Run it manually (typical local test):
@@ -78,19 +77,6 @@ Force parallel database dumps (use with care):
 
 ```bash
 ./mysql_ppdm_protect.sh -D mydb1,mydb2 -j 4 -f
-```
-
-Emulate a PPDM-style run (example):
-
-```bash
-export DD_TARGET_DIRECTORY=/tmp/ppdm-target
-export ASSET_USERNAME=root
-export ASSET_PASSWORD=''
-export BACKUP_LEVEL=FULL
-export BACKUP_RESPONSE_FILEPATH=/tmp/ppdm-backup-response.json
-export TRACE_ID=example-trace-id
-./mysql_ppdm_protect.sh -D mydb -j 4 -f
-cat /tmp/ppdm-backup-response.json
 ```
 
 ### Command-Line Options
@@ -113,7 +99,7 @@ Usage: ./mysql_parallel_protect.sh [-h host] [-P port] [-u user] [-p password] [
 PPDM variant:
 
 ```
-Usage: ./mysql_ppdm_protect.sh [-h host] [-P port] [-u user] [-p password] [-s socket] [-d backup_dir] [-D database1,database2,...] [-j jobs] [-f]
+Usage: ./mysql_ppdm_protect.sh [-h host] [-P port] [-s socket] [-D database1,database2,...] [-j jobs] [-f]
 ```
 
 - `-j` requests parallel jobs, but **parallel is only enabled when `-f` is also provided** (otherwise it runs sequentially).

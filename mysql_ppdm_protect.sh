@@ -6,7 +6,7 @@ set -euo pipefail
 # Copyright (c) 2024 mysql-protect
 # MIT License - see LICENSE file for details
 # 
-# PPDM Compatible: Sequential backups only, no parallel processing
+# PPDM Compatible: Sequential by default; optional forced parallel dumps available
 # Size constraint: Script must stay under 20KB
 ########################################
 
@@ -20,7 +20,7 @@ MYSQL_USER="root"
 MYSQL_PASSWORD=""            # recommended: .my.cnf
 MYSQL_SOCKET=""
 
-BACKUP_DIR="/var/backups/mysql"
+BACKUP_DIR=""
 DATE="$(date +%F_%H-%M-%S)"
 
 COMPRESS="no"
@@ -40,29 +40,22 @@ MYSQLDUMP_BIN="/usr/bin/mysqldump"
 ########################################
 
 usage() {
-  echo "Usage: $0 [-h host] [-P port] [-u user] [-p password] [-s socket] [-d backup_dir] [-D database1,database2,...] [-j jobs] [-f]"
+  echo "Usage: $0 [-h host] [-P port] [-s socket] [-D database1,database2,...] [-j jobs] [-f]"
   echo "  -D: Specify one or more databases to backup (comma-separated). If not specified, all databases are backed up."
   echo "  -j: Requested parallel jobs for database dumps (requires -f to enable)."
   echo "  -f: Force parallel database dumps when -j is greater than 1."
   exit 1
 }
 
-CLI_USER_SET=0
-CLI_PASS_SET=0
-CLI_DIR_SET=0
-
 MAX_JOBS=1
 FORCE_PARALLEL=0
 
 SPECIFIED_DBS=()
-while getopts "h:P:u:p:s:d:D:j:f" opt; do
+while getopts "h:P:s:D:j:f" opt; do
   case $opt in
     h) MYSQL_HOST="$OPTARG" ;;
     P) MYSQL_PORT="$OPTARG" ;;
-    u) MYSQL_USER="$OPTARG"; CLI_USER_SET=1 ;;
-    p) MYSQL_PASSWORD="$OPTARG"; CLI_PASS_SET=1 ;;
     s) MYSQL_SOCKET="$OPTARG" ;;
-    d) BACKUP_DIR="$OPTARG"; CLI_DIR_SET=1 ;;
     D) IFS=',' read -ra DB_ARRAY <<< "$OPTARG"
        SPECIFIED_DBS+=("${DB_ARRAY[@]}")
        ;;
@@ -76,23 +69,56 @@ done
 # PREPARATION
 ########################################
 
-if [[ $CLI_USER_SET -eq 0 && -n "${ASSET_USERNAME:-}" ]]; then
+# ASSET_USERNAME / ASSET_PASSWORD are optional (when not set, rely on defaults or client config such as ~/.my.cnf).
+if [[ -n "${ASSET_USERNAME:-}" ]]; then
   MYSQL_USER="$ASSET_USERNAME"
 fi
-if [[ $CLI_PASS_SET -eq 0 && -n "${ASSET_PASSWORD:-}" ]]; then
+if [[ -n "${ASSET_PASSWORD:-}" ]]; then
   MYSQL_PASSWORD="$ASSET_PASSWORD"
 fi
 
-if [[ -n "${DD_TARGET_DIRECTORY:-}" ]]; then
-  if [[ $CLI_DIR_SET -eq 1 ]]; then
-    # PPDM provides a unique target directory per backup job; prefer it when present.
-    BACKUP_DIR="$DD_TARGET_DIRECTORY"
-  else
-    BACKUP_DIR="$DD_TARGET_DIRECTORY"
-  fi
+if [[ -z "${DD_TARGET_DIRECTORY:-}" ]]; then
+  # PPDM is expected to export DD_TARGET_DIRECTORY for each job. If missing, fail fast.
+  echo "DD_TARGET_DIRECTORY is not set" >&2
+  exit 1
 fi
 
+# PPDM provides a unique target directory per backup job; always use it.
+BACKUP_DIR="$DD_TARGET_DIRECTORY"
+
 mkdir -p "$BACKUP_DIR"/logs
+
+# Log configuration (similar approach to Dell PPDM example scripts)
+# Write logs to /var/log for easier debugging, then copy into "$BACKUP_DIR/logs" on exit.
+LOG_DIR="/var/log/mysql_ppdm_protect"
+LOG_BASENAME="mysql_ppdm_protect.log"
+LOG_PATH="${LOG_DIR}/${LOG_BASENAME}"
+MAX_LOG_SIZE=${MAX_LOG_SIZE:-1048576}
+MAX_LOGS=${MAX_LOGS:-5}
+
+# Ensure /var/log log directory exists (best effort)
+mkdir -p "$LOG_DIR" 2>/dev/null || true
+
+# Rotate log if it exceeds MAX_LOG_SIZE
+if [[ -f "$LOG_PATH" ]]; then
+  LOG_SIZE=$(wc -c < "$LOG_PATH" 2>/dev/null || echo 0)
+  if [[ "$LOG_SIZE" -ge "$MAX_LOG_SIZE" ]]; then
+    LOG_TS=$(date '+%Y%m%d_%H%M%S')
+    mv "$LOG_PATH" "${LOG_PATH}.${LOG_TS}" 2>/dev/null || true
+    : > "$LOG_PATH" 2>/dev/null || true
+  fi
+else
+  : > "$LOG_PATH" 2>/dev/null || true
+fi
+
+# Keep only the most recent MAX_LOGS rotated logs, delete older ones
+LOG_INDEX=0
+while IFS= read -r f; do
+  LOG_INDEX=$((LOG_INDEX + 1))
+  if [[ "$LOG_INDEX" -gt "$MAX_LOGS" ]]; then
+    rm -f "$f" 2>/dev/null || true
+  fi
+done < <(ls -1t "${LOG_PATH}."* 2>/dev/null || true)
 
 build_mysql_opts() {
   local -a opts
@@ -114,49 +140,35 @@ log() {
   local timestamp
   timestamp=$(date '+%Y-%m-%d %H:%M:%S')
   if [[ -n "${TRACE_ID:-}" ]]; then
-    echo "[$timestamp] [$level] [${TRACE_ID}] $message"
+    echo "[$timestamp] [$level] [${TRACE_ID}] $message" | tee -a "$LOG_PATH" >/dev/null
   else
-    echo "[$timestamp] [$level] $message"
+    echo "[$timestamp] [$level] $message" | tee -a "$LOG_PATH" >/dev/null
   fi
 }
 
 on_error() {
   log "ERROR" "Backup failed"
-  write_backup_response "ERROR" "Backup failed"
   exit 1
 }
 
 trap on_error ERR
 
-write_backup_response() {
-  # If BACKUP_RESPONSE_FILEPATH is provided by PPDM, write JSON response.
-  # ddBackupPath must contain folder paths (not file paths).
-  local status="$1" # OK or ERROR
-  local msg="${2:-}"
-  local out="${BACKUP_RESPONSE_FILEPATH:-}"
-  [[ -z "$out" ]] && return 0
-
-  # Build JSON array from DD_BACKUP_PATHS.
-  local json_paths=""
-  local p
-  for p in "${DD_BACKUP_PATHS[@]:-}"; do
-    # Minimal escaping for quotes/backslashes.
-    p=${p//\\/\\\\}
-    p=${p//\"/\\\"}
-    if [[ -n "$json_paths" ]]; then
-      json_paths+=", "
-    fi
-    json_paths+="\"$p\""
-  done
-
-  if [[ "$status" == "OK" ]]; then
-    printf '{\n  "ddBackupPath": [%s]\n}\n' "$json_paths" > "$out" 2>/dev/null || true
-  else
-    msg=${msg//\\/\\\\}
-    msg=${msg//\"/\\\"}
-    printf '{\n  "ddBackupPath": [%s],\n  "error": {\n    "errorMessage": "%s"\n  }\n}\n' "$json_paths" "$msg" > "$out" 2>/dev/null || true
+copy_logs_to_backup_dir() {
+  local dest="$BACKUP_DIR/logs"
+  mkdir -p "$dest" 2>/dev/null || true
+  if [[ -f "$LOG_PATH" ]]; then
+    cp -p "$LOG_PATH" "$dest/" 2>/dev/null || true
   fi
+  local f
+  for f in "${LOG_PATH}."*; do
+    [[ -f "$f" ]] && cp -p "$f" "$dest/" 2>/dev/null || true
+  done
 }
+
+trap copy_logs_to_backup_dir EXIT
+
+log "INFO" "Script started"
+log "INFO" "Backup target: $BACKUP_DIR"
 
 is_excluded() {
   [[ -n "${EXCLUDE_DBS[$1]:-}" ]]
@@ -248,21 +260,15 @@ else
 fi
 
 # PPDM guideline: handle unsupported backup levels gracefully with a clear message.
-if [[ -n "${BACKUP_LEVEL:-}" ]]; then
-  LEVEL_UPPER=$(echo "$BACKUP_LEVEL" | tr '[:lower:]' '[:upper:]')
-  if [[ "$LEVEL_UPPER" != "FULL" ]]; then
-    log "ERROR" "Backup level must be full. Exiting"
-    DD_BACKUP_PATHS=()
-    write_backup_response "ERROR" "Backup level must be full"
-    exit 1
-  fi
+if [[ -z "${BACKUP_LEVEL:-}" ]]; then
+  log "ERROR" "BACKUP_LEVEL is not set"
+  exit 1
 fi
-
-# Track backup directories for PPDM response output (folder paths only).
-DD_BACKUP_PATHS=()
-for db in "${VALID_DBS[@]}"; do
-  DD_BACKUP_PATHS+=("$BACKUP_DIR/dumps/$db")
-done
+LEVEL_UPPER=$(echo "$BACKUP_LEVEL" | tr '[:lower:]' '[:upper:]')
+if [[ "$LEVEL_UPPER" != "FULL" ]]; then
+  log "ERROR" "Backup level must be full. Exiting"
+  exit 1
+fi
 
 # Optional parallelism (disabled unless forced).
 PARALLEL_ENABLED=0
@@ -295,10 +301,8 @@ else
   done
 fi
 if [[ $FAILED -ne 0 ]]; then
-  write_backup_response "ERROR" "Backup failed"
   exit 1
 fi
-write_backup_response "OK"
 
 ########################################
 # BINLOG AND MYSQL LOGS BACKUP
