@@ -321,6 +321,119 @@ MYSQL_BIN="/usr/bin/mysql"
 MYSQLDUMP_BIN="/usr/bin/mysqldump"
 ```
 
+## Dev lab (Podman)
+
+To stand up a quick local MySQL lab environment for development/testing using Podman:
+
+### Deploy a MySQL container
+
+1. Pull the MySQL image:
+
+```bash
+podman pull mysql
+```
+
+2. Run MySQL (example: root password `MySql`, port `3306`):
+
+```bash
+podman run -d -p 3306:3306 -e MYSQL_ROOT_PASSWORD=MySql --name mysql-db mysql:latest
+```
+
+3. Confirm it is running:
+
+```bash
+podman ps
+```
+
+4. Connect to MySQL inside the container:
+
+```bash
+podman exec -it mysql-db mysql -u root -p
+```
+
+5. Validate from the MySQL prompt:
+
+```sql
+SHOW DATABASES;
+```
+
+### Create multiple databases and seed sample data
+
+Run the following from your host to create a few databases, tables, and rows:
+
+```bash
+podman exec -i mysql-db mysql -u root -pMySql <<'SQL'
+CREATE DATABASE IF NOT EXISTS appdb;
+CREATE DATABASE IF NOT EXISTS testdb;
+CREATE DATABASE IF NOT EXISTS analytics;
+
+USE appdb;
+CREATE TABLE IF NOT EXISTS users (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  email VARCHAR(255) NOT NULL UNIQUE,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+INSERT INTO users (email) VALUES ('alice@example.com'), ('bob@example.com');
+
+USE testdb;
+CREATE TABLE IF NOT EXISTS notes (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  note TEXT NOT NULL
+);
+INSERT INTO notes (note) VALUES ('hello'), ('ppdm lab');
+
+USE analytics;
+CREATE TABLE IF NOT EXISTS events (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  event_name VARCHAR(100) NOT NULL,
+  event_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+INSERT INTO events (event_name) VALUES ('startup'), ('seeded');
+SQL
+```
+
+Verify:
+
+```bash
+podman exec -it mysql-db mysql -u root -pMySql -e "SHOW DATABASES; SHOW TABLES FROM appdb; SELECT * FROM appdb.users;"
+```
+
+### Create DBs, load data, and simulate user activity (MySQL Workbench)
+
+1. **Open MySQL Workbench** → **Database → Manage Connections** → **New**:
+   - **Hostname**: `127.0.0.1`
+   - **Port**: `3306`
+   - **Username**: `root`
+   - **Password**: `MySql`
+
+2. **Create databases and tables**:
+   - Open a new SQL tab and run the same SQL from the “seed sample data” section above.
+
+3. **Load data (Workbench GUI options)**:
+   - **Table Data Import Wizard**: Right-click a schema/table → **Table Data Import Wizard** (CSV/JSON).
+   - **Server → Data Import**: Import from a self-contained file (a `.sql` dump) or from a folder of dump files.
+
+4. **Simulate user activity** (run these in a Workbench SQL tab, a few times):
+
+```sql
+USE appdb;
+INSERT INTO users (email) VALUES (CONCAT('user', FLOOR(RAND()*100000), '@example.com'));
+SELECT COUNT(*) AS user_count FROM users;
+
+USE analytics;
+INSERT INTO events (event_name) VALUES ('login');
+SELECT event_name, COUNT(*) AS c FROM events GROUP BY event_name ORDER BY c DESC;
+```
+
+### Stop and remove the lab container
+
+```bash
+podman stop mysql-db
+podman rm mysql-db
+```
+
+Reference: [Database setup with Podman containers](https://sharafat.pages.dev/database-containers/)
+
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
