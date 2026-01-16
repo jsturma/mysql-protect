@@ -177,12 +177,19 @@ run_mysqldump() {
   return $rc
 }
 
+STAGE="init"
+
 on_error() {
-  log "ERROR" "Backup failed"
+  local rc="${1:-1}"
+  local line="${2:-0}"
+  local cmd="${3:-unknown}"
+  local func="${4:-main}"
+  log "ERROR" "Failure rc=$rc stage=$STAGE func=$func line=$line"
+  log "ERROR" "Last command: $cmd"
   exit 1
 }
 
-trap on_error ERR
+trap 'on_error "$?" "$LINENO" "$BASH_COMMAND" "${FUNCNAME[0]:-main}"' ERR
 
 copy_logs_to_backup_dir() {
   local dest="$BACKUP_DIR/logs"
@@ -234,6 +241,8 @@ backup_database() {
 ########################################
 # DATABASE LIST
 ########################################
+
+STAGE="database_list"
 
 # If specific databases are specified, use them; otherwise discover all databases
 if [[ ${#SPECIFIED_DBS[@]} -gt 0 ]]; then
@@ -309,6 +318,7 @@ elif [[ "$MAX_JOBS" -gt 1 && "$FORCE_PARALLEL" -eq 0 ]]; then
 fi
 
 # Sequential backup (PPDM compatible - no parallel processing)
+STAGE="database_backup"
 FAILED=0
 if [[ "$PARALLEL_ENABLED" -eq 1 ]]; then
   log "INFO" "Backing up ${#VALID_DBS[@]} databases with xargs (${MAX_JOBS} jobs)"
@@ -332,6 +342,7 @@ fi
 ########################################
 # BINLOG AND MYSQL LOGS BACKUP
 ########################################
+STAGE="mysql_logs"
 log "INFO" "Starting BINLOG AND MYSQL LOGS BACKUP"
 log "INFO" "Retrieving MySQL variables"
 # Combine all SHOW VARIABLES queries into one
