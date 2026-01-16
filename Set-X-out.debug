@@ -1,0 +1,25 @@
++ echo '[2026-01-16 16:15:56] [INFO] Retrieving MySQL variables'
++ tee -a /var/log/mysql_ppdm_protect/mysql_ppdm_protect.log
+./mysql_ppdm_protect.sh: line 320: MYSQL_OPTS[@]: unbound variable
++ MYSQL_VARS=
+++ on_error
+++ log ERROR 'Backup failed'
+++ local level=ERROR
+++ shift
+++ local 'message=Backup failed'
+++ local timestamp
++++ date '+%Y-%m-%d %H:%M:%S'
+++ timestamp='2026-01-16 16:15:56'
+++ [[ -n '' ]]
+++ echo '[2026-01-16 16:15:56] [ERROR] Backup failed'
+++ tee -a /var/log/mysql_ppdm_protect/mysql_ppdm_protect.log
+++ exit 1
++ copy_logs_to_backup_dir
++ local dest=/tmp/mysql/logs
++ mkdir -p /tmp/mysql/logs
++ [[ -f /var/log/mysql_ppdm_protect/mysql_ppdm_protect.log ]]
++ cp -p /var/log/mysql_ppdm_protect/mysql_ppdm_protect.log /tmp/mysql/logs/
++ local f
++ for f in '"${LOG_PATH}."*'
++ [[ -f /var/log/mysql_ppdm_protect/mysql_ppdm_protect.log.* ]]
++ true
