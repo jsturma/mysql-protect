@@ -79,6 +79,15 @@ Force parallel database dumps (use with care):
 ./mysql_ppdm_protect.sh -D mydb1,mydb2 -j 4 -f
 ```
 
+Run with debug enabled (example):
+
+```bash
+export DEBUG=1
+export DD_TARGET_DIRECTORY=/tmp/ppdm-mysql-backup
+export BACKUP_LEVEL=FULL
+./mysql_ppdm_protect.sh -D mydb
+```
+
 ### Command-Line Options
 
 ```

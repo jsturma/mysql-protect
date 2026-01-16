@@ -1,6 +1,5 @@
 #!/bin/bash
 set -euo pipefail
-set -x
 ########################################
 # MySQL Backup Script - Dell PPDM Compatible
 # Copyright (c) 2024 mysql-protect
@@ -90,35 +89,40 @@ mkdir -p "$BACKUP_DIR"/logs
 
 # Log configuration (similar approach to Dell PPDM example scripts)
 # Write logs to /var/log for easier debugging, then copy into "$BACKUP_DIR/logs" on exit.
+# Each run creates a new log file.
 LOG_DIR="/var/log/mysql_ppdm_protect"
-LOG_BASENAME="mysql_ppdm_protect.log"
-LOG_PATH="${LOG_DIR}/${LOG_BASENAME}"
-MAX_LOG_SIZE=${MAX_LOG_SIZE:-1048576}
-MAX_LOGS=${MAX_LOGS:-5}
+MAX_LOGS=${MAX_LOGS:-10}
 
 # Ensure /var/log log directory exists (best effort)
 mkdir -p "$LOG_DIR" 2>/dev/null || true
 
-# Rotate log if it exceeds MAX_LOG_SIZE
-if [[ -f "$LOG_PATH" ]]; then
-  LOG_SIZE=$(wc -c < "$LOG_PATH" 2>/dev/null || echo 0)
-  if [[ "$LOG_SIZE" -ge "$MAX_LOG_SIZE" ]]; then
-    LOG_TS=$(date '+%Y%m%d_%H%M%S')
-    mv "$LOG_PATH" "${LOG_PATH}.${LOG_TS}" 2>/dev/null || true
-    : > "$LOG_PATH" 2>/dev/null || true
-  fi
-else
-  : > "$LOG_PATH" 2>/dev/null || true
+RUN_TS=$(date '+%Y%m%d_%H%M%S')
+RUN_ID="${RUN_TS}_$$"
+if [[ -n "${TRACE_ID:-}" ]]; then
+  TRACE_SAFE=$(echo "$TRACE_ID" | tr -cd 'A-Za-z0-9._-' | cut -c1-64)
+  [[ -n "$TRACE_SAFE" ]] && RUN_ID="${RUN_ID}_${TRACE_SAFE}"
 fi
+LOG_BASENAME="mysql_ppdm_protect_${RUN_ID}.log"
+LOG_PATH="${LOG_DIR}/${LOG_BASENAME}"
 
-# Keep only the most recent MAX_LOGS rotated logs, delete older ones
+# Create a new log file for this run (do not append to an existing one)
+: > "$LOG_PATH" 2>/dev/null || true
+
+# Keep only the most recent MAX_LOGS run logs, delete older ones
 LOG_INDEX=0
 while IFS= read -r f; do
   LOG_INDEX=$((LOG_INDEX + 1))
   if [[ "$LOG_INDEX" -gt "$MAX_LOGS" ]]; then
     rm -f "$f" 2>/dev/null || true
   fi
-done < <(ls -1t "${LOG_PATH}."* 2>/dev/null || true)
+done < <(ls -1t "$LOG_DIR"/mysql_ppdm_protect_*.log 2>/dev/null || true)
+
+# Debug tracing:
+# - Enable with env DEBUG=1 (or DEBUG=yes), or create /var/log/mysql_ppdm_protect/.debug
+DEBUG_ENABLED=0
+if [[ "${DEBUG:-}" == "1" || "${DEBUG:-}" == "yes" || -f "$LOG_DIR/.debug" ]]; then
+  DEBUG_ENABLED=1
+fi
 
 build_mysql_opts() {
   local -a opts
@@ -146,6 +150,33 @@ log() {
   fi
 }
 
+# Run MySQL commands without leaking credentials when debug tracing is enabled.
+run_mysql() {
+  local -a opts
+  # shellcheck disable=SC2207
+  opts=($(build_mysql_opts))
+  local had_xtrace=0
+  case $- in *x*) had_xtrace=1 ;; esac
+  [[ $had_xtrace -eq 1 ]] && set +x
+  "$MYSQL_BIN" "${opts[@]}" "$@"
+  local rc=$?
+  [[ $had_xtrace -eq 1 ]] && set -x
+  return $rc
+}
+
+run_mysqldump() {
+  local -a opts
+  # shellcheck disable=SC2207
+  opts=($(build_mysql_opts))
+  local had_xtrace=0
+  case $- in *x*) had_xtrace=1 ;; esac
+  [[ $had_xtrace -eq 1 ]] && set +x
+  "$MYSQLDUMP_BIN" "${opts[@]}" "$@"
+  local rc=$?
+  [[ $had_xtrace -eq 1 ]] && set -x
+  return $rc
+}
+
 on_error() {
   log "ERROR" "Backup failed"
   exit 1
@@ -159,16 +190,16 @@ copy_logs_to_backup_dir() {
   if [[ -f "$LOG_PATH" ]]; then
     cp -p "$LOG_PATH" "$dest/" 2>/dev/null || true
   fi
-  local f
-  for f in "${LOG_PATH}."*; do
-    [[ -f "$f" ]] && cp -p "$f" "$dest/" 2>/dev/null || true
-  done
 }
 
 trap copy_logs_to_backup_dir EXIT
 
 log "INFO" "Script started"
 log "INFO" "Backup target: $BACKUP_DIR"
+if [[ $DEBUG_ENABLED -eq 1 ]]; then
+  log "INFO" "Debug tracing enabled"
+  set -x
+fi
 
 is_excluded() {
   [[ -n "${EXCLUDE_DBS[$1]:-}" ]]
@@ -179,12 +210,8 @@ backup_database() {
   local db_dir="$BACKUP_DIR/dumps/$db"
   mkdir -p "$db_dir"
   local out="$db_dir/${db}_${DATE}.sql"
-  local -a opts
-  # shellcheck disable=SC2207
-  opts=($(build_mysql_opts))
   
-  if "$MYSQLDUMP_BIN" \
-    "${opts[@]}" \
+  if run_mysqldump \
     --single-transaction \
     --routines \
     --events \
@@ -214,11 +241,10 @@ if [[ ${#SPECIFIED_DBS[@]} -gt 0 ]]; then
   # Validate that specified databases exist
   log "INFO" "Validating specified databases"
   ALL_DBS=()
-  # shellcheck disable=SC2207
-  ALL_OPTS=($(build_mysql_opts))
+  DB_OUTPUT=$(run_mysql -N -e "SHOW DATABASES;" 2>/dev/null) || { log "ERROR" "Unable to connect to MySQL" >&2; exit 1; }
   while IFS= read -r db; do
     [[ -n "$db" ]] && ALL_DBS+=("$db")
-  done < <("$MYSQL_BIN" "${ALL_OPTS[@]}" -N -e "SHOW DATABASES;" 2>/dev/null || { log "ERROR" "Unable to connect to MySQL" >&2; exit 1; })
+  done <<< "$DB_OUTPUT"
   
   # Check if specified databases exist
   declare -A DB_MAP
@@ -242,11 +268,10 @@ if [[ ${#SPECIFIED_DBS[@]} -gt 0 ]]; then
 else
   log "INFO" "Discovering MySQL databases"
   DATABASES=()
-  # shellcheck disable=SC2207
-  DISC_OPTS=($(build_mysql_opts))
+  DB_OUTPUT=$(run_mysql -N -e "SHOW DATABASES;" 2>/dev/null) || { log "ERROR" "Unable to connect to MySQL" >&2; exit 1; }
   while IFS= read -r db; do
     [[ -n "$db" ]] && DATABASES+=("$db")
-  done < <("$MYSQL_BIN" "${DISC_OPTS[@]}" -N -e "SHOW DATABASES;" 2>/dev/null || { log "ERROR" "Unable to connect to MySQL" >&2; exit 1; })
+  done <<< "$DB_OUTPUT"
   
   # Filter excluded databases
   VALID_DBS=()
@@ -287,7 +312,7 @@ fi
 FAILED=0
 if [[ "$PARALLEL_ENABLED" -eq 1 ]]; then
   log "INFO" "Backing up ${#VALID_DBS[@]} databases with xargs (${MAX_JOBS} jobs)"
-  export -f backup_database log build_mysql_opts
+  export -f backup_database log build_mysql_opts run_mysqldump run_mysql
   export MYSQLDUMP_BIN BACKUP_DIR DATE COMPRESS MYSQL_USER MYSQL_PASSWORD MYSQL_SOCKET MYSQL_HOST MYSQL_PORT
   if ! printf '%s\0' "${VALID_DBS[@]}" | xargs -0 -n1 -P"$MAX_JOBS" bash -c 'backup_database "$1"' _; then
     FAILED=1
@@ -310,12 +335,12 @@ fi
 log "INFO" "Starting BINLOG AND MYSQL LOGS BACKUP"
 log "INFO" "Retrieving MySQL variables"
 # Combine all SHOW VARIABLES queries into one
-MYSQL_VARS=$("$MYSQL_BIN" "${MYSQL_OPTS[@]}" -N -e "
+MYSQL_VARS=$(run_mysql -N -e "
   SELECT CONCAT(VARIABLE_NAME, '=', VARIABLE_VALUE)
   FROM information_schema.GLOBAL_VARIABLES
   WHERE VARIABLE_NAME IN ('log_bin_basename', 'log_error', 'slow_query_log_file', 'general_log_file')
   AND VARIABLE_VALUE IS NOT NULL AND VARIABLE_VALUE != '';
-" 2>/dev/null || "$MYSQL_BIN" "${MYSQL_OPTS[@]}" -N -e "
+" 2>/dev/null || run_mysql -N -e "
   SHOW VARIABLES WHERE Variable_name IN ('log_bin_basename', 'log_error', 'slow_query_log_file', 'general_log_file');
 " 2>/dev/null | awk '{print $1"="substr($0, index($0,$2))}')
 log "INFO" "Retrieving MySQL variables, done"
