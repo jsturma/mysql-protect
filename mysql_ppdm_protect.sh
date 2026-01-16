@@ -1,6 +1,6 @@
 #!/bin/bash
 set -euo pipefail
-
+set -x
 ########################################
 # MySQL Backup Script - Dell PPDM Compatible
 # Copyright (c) 2024 mysql-protect
@@ -307,7 +307,7 @@ fi
 ########################################
 # BINLOG AND MYSQL LOGS BACKUP
 ########################################
-
+log "INFO" "Starting BINLOG AND MYSQL LOGS BACKUP"
 log "INFO" "Retrieving MySQL variables"
 # Combine all SHOW VARIABLES queries into one
 MYSQL_VARS=$("$MYSQL_BIN" "${MYSQL_OPTS[@]}" -N -e "
@@ -318,13 +318,14 @@ MYSQL_VARS=$("$MYSQL_BIN" "${MYSQL_OPTS[@]}" -N -e "
 " 2>/dev/null || "$MYSQL_BIN" "${MYSQL_OPTS[@]}" -N -e "
   SHOW VARIABLES WHERE Variable_name IN ('log_bin_basename', 'log_error', 'slow_query_log_file', 'general_log_file');
 " 2>/dev/null | awk '{print $1"="substr($0, index($0,$2))}')
-
+log "INFO" "Retrieving MySQL variables, done"
+log "INFO" "Parsing MySQL variables"
 # Parse variables
 declare -A VAR_MAP
 while IFS='=' read -r key value; do
   [[ -n "$key" && -n "$value" ]] && VAR_MAP["$key"]="$value"
 done <<< "$MYSQL_VARS"
-
+log "INFO" "Parsing MySQL variables, done"
 # Backup binlogs
 log "INFO" "Backing up binlogs"
 if [[ -n "${VAR_MAP[log_bin_basename]:-}" ]]; then
