@@ -64,7 +64,7 @@ This repo includes a PPDM-focused variant:
 Key behavior (when PPDM provides these exported variables):
 - **`DD_TARGET_DIRECTORY`**: if set, backups are written under this directory (PPDM target path for the job).
 - **`ASSET_USERNAME` / `ASSET_PASSWORD`**: optional; when set, used for MySQL authentication. When not set, rely on defaults or client config (for example, `~/.my.cnf`).
-- **`BACKUP_LEVEL`**: only `FULL` is supported; other values are rejected with a clear error.
+- **`BACKUP_LEVEL`**: only `FULL` is supported; other values are ignored and the script forces a FULL backup with a warning.
 - **`TRACE_ID`**: included in log output when present.
 
 Run it manually (typical local test):

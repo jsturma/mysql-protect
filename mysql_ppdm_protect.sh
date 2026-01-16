@@ -284,15 +284,15 @@ else
   done
 fi
 
-# PPDM guideline: handle unsupported backup levels gracefully with a clear message.
-if [[ -z "${BACKUP_LEVEL:-}" ]]; then
-  log "ERROR" "BACKUP_LEVEL is not set"
-  exit 1
-fi
-LEVEL_UPPER=$(echo "$BACKUP_LEVEL" | tr '[:lower:]' '[:upper:]')
-if [[ "$LEVEL_UPPER" != "FULL" ]]; then
-  log "ERROR" "Backup level must be full. Exiting"
-  exit 1
+# BACKUP_LEVEL: only FULL is supported. Ignore other values and force FULL with a clear warning.
+LEVEL_RAW="${BACKUP_LEVEL:-}"
+LEVEL_UPPER=$(echo "$LEVEL_RAW" | tr '[:lower:]' '[:upper:]')
+if [[ -z "$LEVEL_UPPER" ]]; then
+  log "WARN" "BACKUP_LEVEL is not set; forcing FULL backup"
+  LEVEL_UPPER="FULL"
+elif [[ "$LEVEL_UPPER" != "FULL" ]]; then
+  log "WARN" "BACKUP_LEVEL=$LEVEL_RAW is not supported; forcing FULL backup"
+  LEVEL_UPPER="FULL"
 fi
 
 # Optional parallelism (disabled unless forced).
