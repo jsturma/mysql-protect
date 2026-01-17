@@ -32,12 +32,12 @@ cd mysql-protect
 
 2. Make the script executable:
 ```bash
-chmod +x mysql_parallel_protect.sh
+chmod +x mysql_protect.sh
 ```
 
 3. (Optional) Move to a system path:
 ```bash
-sudo mv mysql_parallel_protect.sh /usr/local/bin/mysql-protect
+sudo mv mysql_protect.sh /usr/local/bin/mysql-protect
 ```
 
 ## Usage
@@ -45,24 +45,22 @@ sudo mv mysql_parallel_protect.sh /usr/local/bin/mysql-protect
 ### Basic Usage
 
 ```bash
-./mysql_parallel_protect.sh
+./mysql_protect.sh -D mydb
 ```
 
 This will use default settings:
 - Connect to `localhost:3306` as `root`
-- Backup to `/var/backups/mysql`
+- Backup to `DD_TARGET_DIRECTORY` (required)
 - No compression (backups stored as plain SQL files)
 - Backup all databases (excluding system databases: information_schema, performance_schema, mysql, sys)
 - Use `-D` option to backup specific databases only
 
-### Dell PPDM Generic Application Agent usage
+### Job-runner integration
 
-This repo includes a PPDM-focused variant:
+The script supports running under an external job runner that exports environment variables.
 
-- **`mysql_ppdm_protect.sh`**: optimized for Dell PowerProtect Data Manager Generic Application Agent scripting (sequential backups, no parallelization).
-
-Key behavior (when PPDM provides these exported variables):
-- **`DD_TARGET_DIRECTORY`**: if set, backups are written under this directory (PPDM target path for the job).
+Key behavior (when the job runner provides these exported variables):
+- **`DD_TARGET_DIRECTORY`**: required; backups are written under this directory (target path for the job).
 - **`ASSET_USERNAME` / `ASSET_PASSWORD`**: optional; when set, used for MySQL authentication. When not set, rely on defaults or client config (for example, `~/.my.cnf`).
 - **`BACKUP_LEVEL`**: only `FULL` is supported; other values are ignored and the script forces a FULL backup with a warning.
 - **`TRACE_ID`**: included in log output when present.
@@ -70,92 +68,49 @@ Key behavior (when PPDM provides these exported variables):
 Run it manually (typical local test):
 
 ```bash
-./mysql_ppdm_protect.sh -h localhost -u root -d /tmp/mysql-backups -D mydb
+./mysql_protect.sh -h localhost -u root -d /tmp/mysql-backups -D mydb
 ```
 
 Force parallel database dumps (use with care):
 
 ```bash
-./mysql_ppdm_protect.sh -D mydb1,mydb2 -j 4 -f
+./mysql_protect.sh -D mydb1,mydb2 -j 4 -f
 ```
 
 Run with debug enabled (example):
 
 ```bash
 export DEBUG=1
-export DD_TARGET_DIRECTORY=/tmp/ppdm-mysql-backup
+export DD_TARGET_DIRECTORY=/tmp/mysql-backup-target
 export BACKUP_LEVEL=FULL
-./mysql_ppdm_protect.sh -D mydb
+./mysql_protect.sh -D mydb
 ```
 
 ### Command-Line Options
 
 ```
-Usage: ./mysql_parallel_protect.sh [-h host] [-P port] [-u user] [-p password] [-s socket] [-d backup_dir] [-j jobs] [-D database1,database2,...]
-```
-
-| Option | Description | Default |
-|--------|-------------|---------|
-| `-h` | MySQL host | `localhost` |
-| `-P` | MySQL port | `3306` |
-| `-u` | MySQL user | `root` |
-| `-p` | MySQL password | (empty, use `.my.cnf` recommended) |
-| `-s` | MySQL socket path | (empty, uses host/port) |
-| `-d` | Backup directory | `/var/backups/mysql` |
-| `-j` | Number of parallel jobs | `1` (sequential) |
-| `-D` | Specific databases to backup (comma-separated) | All databases (excluding system DBs) |
-
-PPDM variant:
-
-```
-Usage: ./mysql_ppdm_protect.sh [-h host] [-P port] [-s socket] [-D database1,database2,...] [-j jobs] [-f]
+Usage: ./mysql_protect.sh [-h host] [-P port] [-s socket] [-D database1,database2,...] [-j jobs] [-f]
 ```
 
 - `-j` requests parallel jobs, but **parallel is only enabled when `-f` is also provided** (otherwise it runs sequentially).
 
 ### Examples
 
-**Backup with custom host and user:**
-```bash
-./mysql_parallel_protect.sh -h db.example.com -u backup_user -p mypassword
-```
-
-**Backup to custom directory:**
-```bash
-./mysql_parallel_protect.sh -d /backups/mysql -u root
-```
-
-**Parallel backup (4 concurrent jobs):**
-```bash
-./mysql_parallel_protect.sh -j 4 -u root
-```
-
 **Using MySQL socket:**
 ```bash
-./mysql_parallel_protect.sh -s /var/run/mysqld/mysqld.sock -u root
+./mysql_protect.sh -s /var/run/mysqld/mysqld.sock -D mydb
 ```
 
 **Backup specific databases:**
 ```bash
 # Backup single database
-./mysql_parallel_protect.sh -D myapp -u root
+./mysql_protect.sh -D myapp
 
 # Backup multiple databases (comma-separated)
-./mysql_parallel_protect.sh -D myapp,mydb,testdb -u root
+./mysql_protect.sh -D myapp,mydb,testdb
 
 # Backup specific databases with parallel processing
-./mysql_parallel_protect.sh -D myapp,mydb -j 4 -u root
-```
-
-**Full example with all options:**
-```bash
-./mysql_parallel_protect.sh \
-  -h db.example.com \
-  -P 3307 \
-  -u backup_user \
-  -p secure_password \
-  -d /mnt/backups/mysql \
-  -j 4
+./mysql_protect.sh -D myapp,mydb -j 4 -f
 ```
 
 ## Configuration
@@ -253,7 +208,7 @@ When using the `-j` option with a value greater than 1, the script will process 
 
 Example:
 ```bash
-./mysql_parallel_protect.sh -j 4  # Process 4 databases simultaneously
+./mysql_protect.sh -D mydb1,mydb2 -j 4 -f
 ```
 
 ## Backup Features
@@ -292,7 +247,7 @@ Only logs that exist and are configured are backed up.
 Example cron job to run daily at 2 AM:
 
 ```bash
-0 2 * * * /path/to/mysql_parallel_protect.sh -u backup_user -d /backups/mysql >> /var/log/mysql-backup.log 2>&1
+0 2 * * * DD_TARGET_DIRECTORY=/backups/mysql BACKUP_LEVEL=FULL /path/to/mysql_protect.sh -D mydb >> /var/log/mysql-backup.log 2>&1
 ```
 
 ## Troubleshooting
@@ -380,7 +335,7 @@ CREATE TABLE IF NOT EXISTS notes (
   id INT PRIMARY KEY AUTO_INCREMENT,
   note TEXT NOT NULL
 );
-INSERT INTO notes (note) VALUES ('hello'), ('ppdm lab');
+INSERT INTO notes (note) VALUES ('hello'), ('lab');
 
 USE analytics;
 CREATE TABLE IF NOT EXISTS events (

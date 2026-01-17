@@ -1,11 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 ########################################
-# MySQL Backup Script - Dell PPDM Compatible
+# MySQL Backup Script
 # Copyright (c) 2024 mysql-protect
 # MIT License - see LICENSE file for details
 # 
-# PPDM Compatible: Sequential by default; optional forced parallel dumps available
+# Sequential by default; optional forced parallel dumps available
 # Size constraint: Script must stay under 20KB
 ########################################
 
@@ -68,29 +68,10 @@ done
 # PREPARATION
 ########################################
 
-# ASSET_USERNAME / ASSET_PASSWORD are optional (when not set, rely on defaults or client config such as ~/.my.cnf).
-if [[ -n "${ASSET_USERNAME:-}" ]]; then
-  MYSQL_USER="$ASSET_USERNAME"
-fi
-if [[ -n "${ASSET_PASSWORD:-}" ]]; then
-  MYSQL_PASSWORD="$ASSET_PASSWORD"
-fi
-
-if [[ -z "${DD_TARGET_DIRECTORY:-}" ]]; then
-  # PPDM is expected to export DD_TARGET_DIRECTORY for each job. If missing, fail fast.
-  echo "DD_TARGET_DIRECTORY is not set" >&2
-  exit 1
-fi
-
-# PPDM provides a unique target directory per backup job; always use it.
-BACKUP_DIR="$DD_TARGET_DIRECTORY"
-
-mkdir -p "$BACKUP_DIR"/logs
-
-# Log configuration (similar approach to Dell PPDM example scripts)
+# Log configuration
 # Write logs to /var/log for easier debugging, then copy into "$BACKUP_DIR/logs" on exit.
 # Each run creates a new log file.
-LOG_DIR="/var/log/mysql_ppdm_protect"
+LOG_DIR="/var/log/mysql_protect"
 MAX_LOGS=${MAX_LOGS:-10}
 
 # Ensure /var/log log directory exists (best effort)
@@ -102,7 +83,7 @@ if [[ -n "${TRACE_ID:-}" ]]; then
   TRACE_SAFE=$(echo "$TRACE_ID" | tr -cd 'A-Za-z0-9._-' | cut -c1-64)
   [[ -n "$TRACE_SAFE" ]] && RUN_ID="${RUN_ID}_${TRACE_SAFE}"
 fi
-LOG_BASENAME="mysql_ppdm_protect_${RUN_ID}.log"
+LOG_BASENAME="mysql_protect_${RUN_ID}.log"
 LOG_PATH="${LOG_DIR}/${LOG_BASENAME}"
 
 # Create a new log file for this run (do not append to an existing one)
@@ -115,27 +96,14 @@ while IFS= read -r f; do
   if [[ "$LOG_INDEX" -gt "$MAX_LOGS" ]]; then
     rm -f "$f" 2>/dev/null || true
   fi
-done < <(ls -1t "$LOG_DIR"/mysql_ppdm_protect_*.log 2>/dev/null || true)
+done < <(ls -1t "$LOG_DIR"/mysql_protect_*.log 2>/dev/null || true)
 
 # Debug tracing:
-# - Enable with env DEBUG=1 (or DEBUG=yes), or create /var/log/mysql_ppdm_protect/.debug
+# - Enable with env DEBUG=1 (or DEBUG=yes), or create /var/log/mysql_protect/.debug
 DEBUG_ENABLED=0
 if [[ "${DEBUG:-}" == "1" || "${DEBUG:-}" == "yes" || -f "$LOG_DIR/.debug" ]]; then
   DEBUG_ENABLED=1
 fi
-
-build_mysql_opts() {
-  local -a opts
-  opts=(-u"$MYSQL_USER")
-  [[ -n "$MYSQL_PASSWORD" ]] && opts+=(-p"$MYSQL_PASSWORD")
-  [[ -n "$MYSQL_SOCKET" ]] && opts+=(--socket="$MYSQL_SOCKET")
-  [[ -z "$MYSQL_SOCKET" ]] && opts+=(-h"$MYSQL_HOST" -P"$MYSQL_PORT")
-  echo "${opts[@]}"
-}
-
-########################################
-# FUNCTIONS
-########################################
 
 log() {
   local level="$1"
@@ -149,6 +117,55 @@ log() {
     echo "[$timestamp] [$level] $message" | tee -a "$LOG_PATH" >/dev/null
   fi
 }
+
+die() {
+  local msg="$*"
+  log "ERROR" "$msg"
+  echo "$msg" >&2
+  exit 1
+}
+
+# ASSET_USERNAME / ASSET_PASSWORD are optional (when not set, rely on defaults or client config such as ~/.my.cnf).
+if [[ -n "${ASSET_USERNAME:-}" ]]; then
+  MYSQL_USER="$ASSET_USERNAME"
+fi
+if [[ -n "${ASSET_PASSWORD:-}" ]]; then
+  MYSQL_PASSWORD="$ASSET_PASSWORD"
+fi
+
+LOCAL_DIR="${LOCAL_DIRECTORY:-}"
+DD_DIR="${DD_TARGET_DIRECTORY:-}"
+WARN_BOTH_DIRS=0
+
+if [[ -n "$DD_DIR" && -n "$LOCAL_DIR" ]]; then
+  WARN_BOTH_DIRS=1
+  TARGET_DIR="$DD_DIR"
+elif [[ -n "$DD_DIR" ]]; then
+  TARGET_DIR="$DD_DIR"
+elif [[ -n "$LOCAL_DIR" ]]; then
+  TARGET_DIR="$LOCAL_DIR"
+else
+  # DD_TARGET_DIRECTORY is expected to be exported by the job runner. If missing, fail fast.
+  die "DD_TARGET_DIRECTORY is not set (LOCAL_DIRECTORY is also not set)"
+fi
+
+# The job runner provides a unique target directory per backup job; always use it.
+BACKUP_DIR="$TARGET_DIR"
+
+mkdir -p "$BACKUP_DIR"/logs
+
+build_mysql_opts() {
+  local -a opts
+  opts=(-u"$MYSQL_USER")
+  [[ -n "$MYSQL_PASSWORD" ]] && opts+=(-p"$MYSQL_PASSWORD")
+  [[ -n "$MYSQL_SOCKET" ]] && opts+=(--socket="$MYSQL_SOCKET")
+  [[ -z "$MYSQL_SOCKET" ]] && opts+=(-h"$MYSQL_HOST" -P"$MYSQL_PORT")
+  echo "${opts[@]}"
+}
+
+########################################
+# FUNCTIONS
+########################################
 
 # Run MySQL commands without leaking credentials when debug tracing is enabled.
 run_mysql() {
@@ -203,6 +220,9 @@ trap copy_logs_to_backup_dir EXIT
 
 log "INFO" "Script started"
 log "INFO" "Backup target: $BACKUP_DIR"
+if [[ "${WARN_BOTH_DIRS:-0}" -eq 1 ]]; then
+  log "WARN" "Both DD_TARGET_DIRECTORY and Local_Directory are set; using DD_TARGET_DIRECTORY"
+fi
 if [[ $DEBUG_ENABLED -eq 1 ]]; then
   log "INFO" "Debug tracing enabled"
   set -x
@@ -317,7 +337,7 @@ elif [[ "$MAX_JOBS" -gt 1 && "$FORCE_PARALLEL" -eq 0 ]]; then
   log "INFO" "Parallel requested but not enabled (use -f to force)"
 fi
 
-# Sequential backup (PPDM compatible - no parallel processing)
+# Database backup
 STAGE="database_backup"
 FAILED=0
 if [[ "$PARALLEL_ENABLED" -eq 1 ]]; then
