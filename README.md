@@ -356,6 +356,12 @@ Verify:
 podman exec -it mysql-db mysql -u root -pMySql -e "SHOW DATABASES; SHOW TABLES FROM appdb; SELECT * FROM appdb.users;"
 ```
 
+### Load official sample databases (optional)
+
+MySQL provides several official sample databases (for example: **Sakila**, **World**, **Employees**) that are useful for demos and testing. See the “Example Databases” section here:
+
+- [Other MySQL Documentation → Example Databases](https://dev.mysql.com/doc/index-other.html)
+
 ### Create DBs, load data, and simulate user activity (MySQL Workbench)
 
 1. **Open MySQL Workbench** → **Database → Manage Connections** → **New**:
