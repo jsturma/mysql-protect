@@ -322,28 +322,31 @@ CREATE DATABASE IF NOT EXISTS appdb;
 CREATE DATABASE IF NOT EXISTS testdb;
 CREATE DATABASE IF NOT EXISTS analytics;
 
-USE appdb;
-CREATE TABLE IF NOT EXISTS users (
+-- Note: If your SQL client does not allow multiple statements per execution,
+-- run these statements one-by-one.
+
+CREATE TABLE IF NOT EXISTS appdb.users (
   id INT PRIMARY KEY AUTO_INCREMENT,
   email VARCHAR(255) NOT NULL UNIQUE,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  created_at TIMESTAMP NULL
 );
-INSERT INTO users (email) VALUES ('alice@example.com'), ('bob@example.com');
+INSERT INTO appdb.users (email, created_at) VALUES ('alice@example.com', NOW());
+INSERT INTO appdb.users (email, created_at) VALUES ('bob@example.com', NOW());
 
-USE testdb;
-CREATE TABLE IF NOT EXISTS notes (
+CREATE TABLE IF NOT EXISTS testdb.notes (
   id INT PRIMARY KEY AUTO_INCREMENT,
   note TEXT NOT NULL
 );
-INSERT INTO notes (note) VALUES ('hello'), ('lab');
+INSERT INTO testdb.notes (note) VALUES ('hello');
+INSERT INTO testdb.notes (note) VALUES ('lab');
 
-USE analytics;
-CREATE TABLE IF NOT EXISTS events (
+CREATE TABLE IF NOT EXISTS analytics.events (
   id INT PRIMARY KEY AUTO_INCREMENT,
   event_name VARCHAR(100) NOT NULL,
-  event_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  event_time TIMESTAMP NULL
 );
-INSERT INTO events (event_name) VALUES ('startup'), ('seeded');
+INSERT INTO analytics.events (event_name, event_time) VALUES ('startup', NOW());
+INSERT INTO analytics.events (event_name, event_time) VALUES ('seeded', NOW());
 SQL
 ```
 
@@ -371,13 +374,108 @@ podman exec -it mysql-db mysql -u root -pMySql -e "SHOW DATABASES; SHOW TABLES F
 4. **Simulate user activity** (run these in a Workbench SQL tab, a few times):
 
 ```sql
-USE appdb;
-INSERT INTO users (email) VALUES (CONCAT('user', FLOOR(RAND()*100000), '@example.com'));
-SELECT COUNT(*) AS user_count FROM users;
+INSERT INTO appdb.users (email, created_at) VALUES (CONCAT('user', FLOOR(RAND()*100000), '@example.com'), NOW());
+SELECT COUNT(*) AS user_count FROM appdb.users;
 
-USE analytics;
-INSERT INTO events (event_name) VALUES ('login');
-SELECT event_name, COUNT(*) AS c FROM events GROUP BY event_name ORDER BY c DESC;
+INSERT INTO analytics.events (event_name, event_time) VALUES ('login', NOW());
+SELECT event_name, COUNT(*) AS c FROM analytics.events GROUP BY event_name ORDER BY c DESC;
+```
+
+### Do the same using the MySQL CLI only (no Workbench)
+
+### Avoid putting `-pPASSWORD` in commands
+
+To avoid exposing passwords in shell history/process lists, prefer one of these approaches:
+
+1. **Prompt for password interactively** (no password in the command):
+
+```bash
+mysql -h 127.0.0.1 -P 3306 -u root -p --get-server-public-key --ssl-mode=DISABLED
+```
+
+2. **Use a client config file** (recommended):
+
+Create `~/.my.cnf`:
+
+```ini
+[client]
+user=root
+password=MySql
+host=127.0.0.1
+port=3306
+ssl-mode=DISABLED
+get-server-public-key=1
+```
+
+Then secure it:
+
+```bash
+chmod 600 ~/.my.cnf
+```
+
+Now you can run:
+
+```bash
+mysql
+```
+
+Note: For container-only access, you can also run `mysql -p` *inside* the container via `podman exec` and type the password when prompted.
+
+Connect from your host:
+
+```bash
+mysql -h 127.0.0.1 -P 3306 -u root -pMySql --get-server-public-key --ssl-mode=DISABLED
+```
+
+Or connect from inside the container:
+
+```bash
+podman exec -it mysql-db mysql -u root -pMySql
+```
+
+Create databases and tables (run in the MySQL prompt):
+
+```sql
+CREATE DATABASE IF NOT EXISTS `appdb`;
+CREATE DATABASE IF NOT EXISTS `testdb`;
+CREATE DATABASE IF NOT EXISTS `analytics`;
+
+CREATE TABLE IF NOT EXISTS appdb.users (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  email VARCHAR(255) NOT NULL UNIQUE,
+  created_at TIMESTAMP NULL
+);
+
+CREATE TABLE IF NOT EXISTS testdb.notes (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  note TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS analytics.events (
+  id INT PRIMARY KEY AUTO_INCREMENT,
+  event_name VARCHAR(100) NOT NULL,
+  event_time TIMESTAMP NULL
+);
+```
+
+Insert sample data (run in the MySQL prompt):
+
+```sql
+INSERT INTO appdb.users (email, created_at) VALUES ('alice@example.com', NOW());
+INSERT INTO appdb.users (email, created_at) VALUES ('bob@example.com', NOW());
+INSERT INTO testdb.notes (note) VALUES ('hello');
+INSERT INTO testdb.notes (note) VALUES ('lab');
+INSERT INTO analytics.events (event_name, event_time) VALUES ('startup', NOW());
+INSERT INTO analytics.events (event_name, event_time) VALUES ('seeded', NOW());
+```
+
+Simulate “user activity” (run a few times):
+
+```sql
+INSERT INTO appdb.users (email, created_at) VALUES (CONCAT('user', FLOOR(RAND()*100000), '@example.com'), NOW());
+INSERT INTO analytics.events (event_name, event_time) VALUES ('login', NOW());
+SELECT COUNT(*) AS user_count FROM appdb.users;
+SELECT event_name, COUNT(*) AS c FROM analytics.events GROUP BY event_name ORDER BY c DESC;
 ```
 
 ### Stop and remove the lab container
