@@ -9,7 +9,7 @@ Simple bash script for backing up MySQL/MariaDB databases with support for paral
 - **Automatic Exclusion**: Excludes system databases (information_schema, performance_schema, mysql, sys) by default
 - **Compression**: Optional gzip compression for space efficiency
 - **Parallel Processing**: Optional parallel backup execution for faster processing
-- **Binlog Backup**: Automatically backs up binary logs if enabled
+- **Binlog Backup**: Automatically backs up binary logs using `mysqlbinlog` if enabled
 - **Log Backup**: Backs up MySQL error logs, slow query logs, and general logs
 - **Timestamped Logging**: All operations are logged with timestamps
 - **Transaction Safety**: Uses `--single-transaction` for consistent backups
@@ -18,7 +18,7 @@ Simple bash script for backing up MySQL/MariaDB databases with support for paral
 ## Requirements
 
 - **Bash**: Version 3.2 or higher (compatible with macOS default bash)
-- **MySQL Client Tools**: `mysql` and `mysqldump` binaries
+- **MySQL Client Tools**: `mysql`, `mysqldump`, and `mysqlbinlog` binaries
 - **Standard Unix Tools**: `gzip`, `xargs` (optional, for parallel processing)
 - **MySQL Access**: Appropriate privileges to read databases and access log files
 
@@ -117,17 +117,32 @@ Usage: ./mysql_protect.sh [-h host] [-P port] [-s socket] [-D database1,database
 
 ### Default Settings
 
-You can modify the default configuration by editing the variables at the top of the script:
+Default configuration values (can be overridden by environment variables):
 
 ```bash
-MYSQL_HOST="localhost"
-MYSQL_PORT="3306"
-MYSQL_USER="root"
-MYSQL_PASSWORD=""            # recommended: .my.cnf
-MYSQL_SOCKET=""
-BACKUP_DIR="/var/backups/mysql"
-COMPRESS="no"
+MYSQL_HOST="127.0.0.1"       # Default: 127.0.0.1 (use 127.0.0.1 instead of localhost to force TCP/IP)
+MYSQL_PORT="3306"            # Default: 3306
+MYSQL_USER="root"            # Default: root
+MYSQL_PASSWORD=""            # Default: empty (recommended: use .my.cnf)
+MYSQL_SOCKET=""              # Default: empty (use TCP/IP if not set)
+BACKUP_DIR=""                # Default: empty (must be set via DD_TARGET_DIRECTORY or LOCAL_DIRECTORY)
+COMPRESS="no"                # Default: no (set to "yes" for gzip compression)
 ```
+
+**Override with environment variables:**
+
+These defaults can be overridden by exporting environment variables before running the script:
+
+```bash
+export MYSQL_HOST="192.168.1.100"
+export MYSQL_PORT="3307"
+export MYSQL_USER="backup_user"
+export MYSQL_PASSWORD="secret"
+export COMPRESS="yes"
+./mysql_protect.sh -D mydb
+```
+
+If environment variables are not set, the default values shown above will be used.
 
 ### Excluded Databases
 
@@ -170,14 +185,20 @@ BACKUP_DIR/
 │   │   ├── database2_2024-01-15_14-30-45.sql
 │   │   └── database2_2024-01-16_14-30-45.sql
 │   └── ...
-└── logs/
-    ├── binlogs_2024-01-15_14-30-45/
+├── binlogs/
+│   └── binlogs_2024-01-15_14-30-45/
+│       ├── mysql-bin.000001.sql
+│       ├── mysql-bin.000002.sql
+│       └── ...
+├── backuplogs/
+│   └── mysql_protect_20240115_143045_12345.log
+└── mysqllogs/
     ├── error.log_2024-01-15_14-30-45
     ├── slow-query.log_2024-01-15_14-30-45
     └── general.log_2024-01-15_14-30-45
 ```
 
-Each database has its own directory under `dumps/`, making it easy to organize and manage backups per database. Server-wide logs (binlogs, error logs, etc.) are stored in the common `logs/` directory.
+Each database has its own directory under `dumps/`, making it easy to organize and manage backups per database. Binary logs are converted to SQL format using `mysqlbinlog` and stored in `binlogs/`. Script execution logs are stored in `backuplogs/`, while MySQL server logs (error, slow query, general) are stored in `mysqllogs/`.
 
 ## Logging
 
@@ -190,7 +211,8 @@ All operations are logged with timestamps. Example output:
 [2024-01-15 14:30:48] [OK] myapp backed up and compressed
 [2024-01-15 14:30:49] [OK] mydb backed up and compressed
 [2024-01-15 14:30:50] [INFO] Backing up binlogs
-[2024-01-15 14:30:51] [OK] Binlogs backed up
+[2024-01-15 14:30:51] [INFO] Backed up binlog: mysql-bin.000001
+[2024-01-15 14:30:52] [OK] 2 binlog(s) backed up
 [2024-01-15 14:30:52] [OK] MySQL backup completed: /var/backups/mysql
 ```
 
@@ -199,6 +221,8 @@ Log levels:
 - `OK`: Successful operations
 - `ERROR`: Error conditions
 - `SKIP`: Skipped/excluded items
+
+Script execution logs are stored in `$BACKUP_DIR/backuplogs/` and include timestamps for all operations.
 
 ## Parallel Processing
 
@@ -215,6 +239,7 @@ Example:
 
 ### Database Dumps
 
+- Uses `mysqldump` for database backups
 - Uses `--single-transaction` for consistent backups without locking tables
 - Includes stored routines (`--routines`)
 - Includes events (`--events`)
@@ -224,14 +249,16 @@ Example:
 ### Binary Logs
 
 - Automatically detects if binary logging is enabled
-- Backs up the entire binlog directory if available
-- Preserves directory structure
+- Uses `mysqlbinlog` to convert binary logs to SQL format
+- Each binlog file is converted and saved as a `.sql` file
+- Stored in `$BACKUP_DIR/binlogs/binlogs_${DATE}/`
 
 ### MySQL Logs
 
 - Error log (`log_error`)
 - Slow query log (`slow_query_log_file`)
 - General log (`general_log_file`)
+- Stored in `$BACKUP_DIR/mysqllogs/`
 
 Only logs that exist and are configured are backed up.
 
@@ -270,11 +297,17 @@ sudo chown $USER:$USER /var/backups/mysql
 
 ### Missing Binaries
 
-If `mysql` or `mysqldump` are not found, update the paths in the script:
+The script automatically locates `mysql`, `mysqldump`, and `mysqlbinlog` using `which`. If they are not found in PATH, the script will exit with an error. Ensure MySQL client tools are installed and in your PATH:
+
 ```bash
-MYSQL_BIN="/usr/bin/mysql"
-MYSQLDUMP_BIN="/usr/bin/mysqldump"
+# Check if binaries are available
+which mysql mysqldump mysqlbinlog
 ```
+
+If needed, install MySQL client tools for your system:
+- **macOS**: `brew install mysql-client`
+- **Debian/Ubuntu**: `apt-get install mysql-client`
+- **RHEL/CentOS**: `yum install mysql`
 
 ## Dev lab (Podman)
 

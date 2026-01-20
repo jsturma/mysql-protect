@@ -13,20 +13,22 @@ set -euo pipefail
 # DEFAULT CONFIGURATION
 ########################################
 
-MYSQL_HOST="127.0.0.1"  # Use 127.0.0.1 instead of localhost to force TCP/IP connection
-MYSQL_PORT="3306"
-MYSQL_USER="root"
-MYSQL_PASSWORD=""            # recommended: .my.cnf
-MYSQL_SOCKET=""
+# Default configuration - can be overridden by environment variables
+MYSQL_HOST="${MYSQL_HOST:-127.0.0.1}"  # Use 127.0.0.1 instead of localhost to force TCP/IP connection
+MYSQL_PORT="${MYSQL_PORT:-3306}"
+MYSQL_USER="${MYSQL_USER:-root}"
+MYSQL_PASSWORD="${MYSQL_PASSWORD:-}"            # recommended: .my.cnf
+MYSQL_SOCKET="${MYSQL_SOCKET:-}"
 
-BACKUP_DIR=""
+BACKUP_DIR="${BACKUP_DIR:-}"
 DATE="$(date +%F_%H-%M-%S)"
 
-COMPRESS="no"
+COMPRESS="${COMPRESS:-no}"
 
-# Dynamically locate mysql and mysqldump binaries
+# Dynamically locate mysql, mysqldump, and mysqlbinlog binaries
 MYSQL_BIN=$(which mysql 2>/dev/null || echo "")
 MYSQLDUMP_BIN=$(which mysqldump 2>/dev/null || echo "")
+MYSQLBINLOG_BIN=$(which mysqlbinlog 2>/dev/null || echo "")
 
 if [[ -z "$MYSQL_BIN" ]]; then
   echo "Error: mysql binary not found in PATH" >&2
@@ -34,6 +36,10 @@ if [[ -z "$MYSQL_BIN" ]]; then
 fi
 if [[ -z "$MYSQLDUMP_BIN" ]]; then
   echo "Error: mysqldump binary not found in PATH" >&2
+  exit 1
+fi
+if [[ -z "$MYSQLBINLOG_BIN" ]]; then
+  echo "Error: mysqlbinlog binary not found in PATH" >&2
   exit 1
 fi
 
@@ -72,7 +78,7 @@ done
 ########################################
 
 # Log configuration
-# Write logs to /var/log for easier debugging, then copy into "$BACKUP_DIR/logs" on exit.
+# Write logs to /var/log for easier debugging, then copy into "$BACKUP_DIR/backuplogs" on exit.
 # Each run creates a new log file.
 LOG_DIR="/var/log/mysql_protect"
 MAX_LOGS=${MAX_LOGS:-10}
@@ -163,7 +169,7 @@ fi
 # The job runner provides a unique target directory per backup job; always use it.
 BACKUP_DIR="$TARGET_DIR"
 
-mkdir -p "$BACKUP_DIR"/logs
+mkdir -p "$BACKUP_DIR"/mysqllogs
 
 build_mysql_opts() {
   local -a opts
@@ -205,6 +211,19 @@ run_mysqldump() {
   return $rc
 }
 
+run_mysqlbinlog() {
+  local -a opts
+  # shellcheck disable=SC2207
+  opts=($(build_mysql_opts))
+  local had_xtrace=0
+  case $- in *x*) had_xtrace=1 ;; esac
+  [[ $had_xtrace -eq 1 ]] && set +x
+  "$MYSQLBINLOG_BIN" "${opts[@]}" "$@"
+  local rc=$?
+  [[ $had_xtrace -eq 1 ]] && set -x
+  return $rc
+}
+
 STAGE="init"
 
 on_error() {
@@ -220,7 +239,7 @@ on_error() {
 trap 'on_error "$?" "$LINENO" "$BASH_COMMAND" "${FUNCNAME[0]:-main}"' ERR
 
 copy_logs_to_backup_dir() {
-  local dest="$BACKUP_DIR/logs"
+  local dest="$BACKUP_DIR/backuplogs"
   mkdir -p "$dest" 2>/dev/null || true
   if [[ -f "$LOG_PATH" ]]; then
     cp -p "$LOG_PATH" "$dest/" 2>/dev/null || true
@@ -435,15 +454,39 @@ get_mysql_var() {
   echo "$MYSQL_VARS" | grep "^${var_name}=" | cut -d'=' -f2- | head -1
 }
 log "INFO" "Parsing MySQL variables, done"
-# Backup binlogs
+# Backup binlogs using mysqlbinlog
 log "INFO" "Backing up binlogs"
 BINLOG_BASENAME=$(get_mysql_var "log_bin_basename")
 if [[ -n "$BINLOG_BASENAME" ]]; then
-  BINLOG_PATH=$(dirname "$BINLOG_BASENAME")
-  if [[ -d "$BINLOG_PATH" ]]; then
-    cp -a "$BINLOG_PATH" "$BACKUP_DIR/logs/binlogs_${DATE}" 2>/dev/null && \
-      log "OK" "Binlogs backed up" || \
-      log "ERROR" "Unable to copy binlogs"
+  BINLOG_DIR=$(dirname "$BINLOG_BASENAME")
+  BINLOG_PREFIX=$(basename "$BINLOG_BASENAME")
+  # Get list of binlog files from MySQL
+  BINLOG_LIST=$(run_mysql -N -e "SHOW BINARY LOGS;" 2>/dev/null | awk '{print $1}' || echo "")
+  if [[ -n "$BINLOG_LIST" ]]; then
+    BINLOG_OUT_DIR="$BACKUP_DIR/binlogs/binlogs_${DATE}"
+    mkdir -p "$BINLOG_OUT_DIR"
+    BINLOG_COUNT=0
+    while IFS= read -r binlog_file; do
+      [[ -z "$binlog_file" ]] && continue
+      binlog_path="$BINLOG_DIR/$binlog_file"
+      if [[ -f "$binlog_path" ]]; then
+        binlog_out="$BINLOG_OUT_DIR/${binlog_file}.sql"
+        if run_mysqlbinlog "$binlog_path" > "$binlog_out" 2>/dev/null; then
+          ((BINLOG_COUNT++))
+          log "INFO" "Backed up binlog: $binlog_file"
+        else
+          log "WARN" "Failed to backup binlog: $binlog_file"
+          rm -f "$binlog_out" 2>/dev/null || true
+        fi
+      fi
+    done <<< "$BINLOG_LIST"
+    if [[ $BINLOG_COUNT -gt 0 ]]; then
+      log "OK" "$BINLOG_COUNT binlog(s) backed up"
+    else
+      log "WARN" "No binlogs were backed up"
+    fi
+  else
+    log "WARN" "Unable to retrieve binlog list from MySQL"
   fi
 else
   log "SKIP" "Binlogs disabled"
@@ -456,7 +499,7 @@ BACKED_UP=0
 for var in "${LOG_VARS[@]}"; do
   LOG_FILE=$(get_mysql_var "$var")
   if [[ -n "$LOG_FILE" && -f "$LOG_FILE" ]]; then
-    if cp "$LOG_FILE" "$BACKUP_DIR/logs/$(basename "$LOG_FILE")_${DATE}" 2>/dev/null; then
+    if cp "$LOG_FILE" "$BACKUP_DIR/mysqllogs/$(basename "$LOG_FILE")_${DATE}" 2>/dev/null; then
       ((BACKED_UP++))
     fi
   fi
