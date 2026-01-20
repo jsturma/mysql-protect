@@ -85,8 +85,8 @@ MAX_LOGS=${MAX_LOGS:-10}
 
 # Ensure log directory exists and is writable, fallback to user-writable location
 if ! mkdir -p "$LOG_DIR" 2>/dev/null || [[ ! -w "$LOG_DIR" ]]; then
-  # Fallback to user-writable location
-  LOG_DIR="${HOME}/.mysql_protect/logs"
+  # Fallback to current directory
+  LOG_DIR="./mysql_protect/logs"
   mkdir -p "$LOG_DIR" || {
     # Last resort: use TMPDIR
     LOG_DIR="${TMPDIR:-/tmp}/mysql_protect_logs"
@@ -441,10 +441,10 @@ log "INFO" "Retrieving MySQL variables"
 MYSQL_VARS=$(run_mysql -N -e "
   SELECT CONCAT(VARIABLE_NAME, '=', VARIABLE_VALUE)
   FROM information_schema.GLOBAL_VARIABLES
-  WHERE VARIABLE_NAME IN ('log_bin_basename', 'log_error', 'slow_query_log_file', 'general_log_file')
+  WHERE VARIABLE_NAME IN ('log_bin', 'log_bin_basename', 'log_error', 'slow_query_log_file', 'general_log_file')
   AND VARIABLE_VALUE IS NOT NULL AND VARIABLE_VALUE != '';
 " 2>/dev/null || run_mysql -N -e "
-  SHOW VARIABLES WHERE Variable_name IN ('log_bin_basename', 'log_error', 'slow_query_log_file', 'general_log_file');
+  SHOW VARIABLES WHERE Variable_name IN ('log_bin', 'log_bin_basename', 'log_error', 'slow_query_log_file', 'general_log_file');
 " 2>/dev/null | awk '{print $1"="substr($0, index($0,$2))}')
 log "INFO" "Retrieving MySQL variables, done"
 log "INFO" "Parsing MySQL variables"
@@ -456,40 +456,73 @@ get_mysql_var() {
 log "INFO" "Parsing MySQL variables, done"
 # Backup binlogs using mysqlbinlog
 log "INFO" "Backing up binlogs"
+LOG_BIN=$(get_mysql_var "log_bin")
 BINLOG_BASENAME=$(get_mysql_var "log_bin_basename")
-if [[ -n "$BINLOG_BASENAME" ]]; then
+if [[ "$LOG_BIN" == "ON" || "$LOG_BIN" == "1" ]] && [[ -n "$BINLOG_BASENAME" ]]; then
   BINLOG_DIR=$(dirname "$BINLOG_BASENAME")
   BINLOG_PREFIX=$(basename "$BINLOG_BASENAME")
+  log "INFO" "Binlog basename: $BINLOG_BASENAME, directory: $BINLOG_DIR"
   # Get list of binlog files from MySQL
   BINLOG_LIST=$(run_mysql -N -e "SHOW BINARY LOGS;" 2>/dev/null | awk '{print $1}' || echo "")
   if [[ -n "$BINLOG_LIST" ]]; then
+    BINLOG_COUNT_TOTAL=0
+    while IFS= read -r binlog_file; do
+      [[ -z "$binlog_file" ]] && continue
+      ((BINLOG_COUNT_TOTAL++))
+    done <<< "$BINLOG_LIST"
+    log "INFO" "Found $BINLOG_COUNT_TOTAL binlog file(s) from MySQL"
     BINLOG_OUT_DIR="$BACKUP_DIR/binlogs/binlogs_${DATE}"
     mkdir -p "$BINLOG_OUT_DIR"
     BINLOG_COUNT=0
+    # mysqlbinlog --raw writes to files in the current directory, so we need to run it in the target directory
     while IFS= read -r binlog_file; do
       [[ -z "$binlog_file" ]] && continue
-      binlog_path="$BINLOG_DIR/$binlog_file"
-      if [[ -f "$binlog_path" ]]; then
-        binlog_out="$BINLOG_OUT_DIR/${binlog_file}.sql"
-        if run_mysqlbinlog "$binlog_path" > "$binlog_out" 2>/dev/null; then
+      log "INFO" "Processing binlog: $binlog_file"
+      BINLOG_ERR=$(mktemp)
+      # Read binary log from remote MySQL server using mysqlbinlog --raw
+      # --raw writes to a file in the current directory, so we cd to the output directory
+      (cd "$BINLOG_OUT_DIR" && run_mysqlbinlog --read-from-remote-server --raw "$binlog_file" >/dev/null 2>"$BINLOG_ERR")
+      BINLOG_RC=$?
+      ERR_OUTPUT=$(cat "$BINLOG_ERR" 2>/dev/null | grep -v "^++\|^+" || echo "")
+      rm -f "$BINLOG_ERR" 2>/dev/null || true
+      
+      binlog_out="$BINLOG_OUT_DIR/$binlog_file"
+      if [[ $BINLOG_RC -eq 0 ]]; then
+        if [[ -f "$binlog_out" && -s "$binlog_out" ]]; then
+          FILE_SIZE=$(stat -f%z "$binlog_out" 2>/dev/null || stat -c%s "$binlog_out" 2>/dev/null || echo "0")
           ((BINLOG_COUNT++))
-          log "INFO" "Backed up binlog: $binlog_file"
+          log "INFO" "Backed up binlog: $binlog_file (from remote server, raw binary, ${FILE_SIZE} bytes)"
         else
-          log "WARN" "Failed to backup binlog: $binlog_file"
+          if [[ -n "$ERR_OUTPUT" ]]; then
+            ERR_FIRST=$(echo "$ERR_OUTPUT" | head -1)
+            log "WARN" "Binlog $binlog_file from remote server produced empty output: $ERR_FIRST"
+          else
+            log "WARN" "Binlog $binlog_file from remote server produced empty output (no errors reported)"
+          fi
           rm -f "$binlog_out" 2>/dev/null || true
         fi
+      else
+        if [[ -n "$ERR_OUTPUT" ]]; then
+          ERR_FIRST=$(echo "$ERR_OUTPUT" | head -1)
+          log "WARN" "Failed to backup binlog $binlog_file from remote server (exit code $BINLOG_RC): $ERR_FIRST"
+        else
+          log "WARN" "Failed to backup binlog $binlog_file from remote server (exit code $BINLOG_RC, no error message)"
+        fi
+        rm -f "$binlog_out" 2>/dev/null || true
       fi
     done <<< "$BINLOG_LIST"
     if [[ $BINLOG_COUNT -gt 0 ]]; then
-      log "OK" "$BINLOG_COUNT binlog(s) backed up"
+      log "OK" "$BINLOG_COUNT binlog(s) backed up (out of $BINLOG_COUNT_TOTAL found)"
     else
-      log "WARN" "No binlogs were backed up"
+      log "WARN" "No binlogs were backed up (found $BINLOG_COUNT_TOTAL binlog(s) in MySQL but none were accessible)"
     fi
   else
-    log "WARN" "Unable to retrieve binlog list from MySQL"
+    log "WARN" "Unable to retrieve binlog list from MySQL (SHOW BINARY LOGS returned empty)"
   fi
+elif [[ "$LOG_BIN" != "ON" && "$LOG_BIN" != "1" ]]; then
+  log "SKIP" "Binlogs disabled (log_bin is OFF)"
 else
-  log "SKIP" "Binlogs disabled"
+  log "SKIP" "Binlogs disabled (log_bin_basename is not set)"
 fi
 
 # Backup MySQL logs
