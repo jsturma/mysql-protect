@@ -13,7 +13,7 @@ set -euo pipefail
 # DEFAULT CONFIGURATION
 ########################################
 
-MYSQL_HOST="localhost"
+MYSQL_HOST="127.0.0.1"  # Use 127.0.0.1 instead of localhost to force TCP/IP connection
 MYSQL_PORT="3306"
 MYSQL_USER="root"
 MYSQL_PASSWORD=""            # recommended: .my.cnf
@@ -23,16 +23,19 @@ BACKUP_DIR=""
 DATE="$(date +%F_%H-%M-%S)"
 
 COMPRESS="no"
-# Using associative array for O(1) lookup instead of O(n)
-declare -A EXCLUDE_DBS=(
-  ["information_schema"]=1
-  ["performance_schema"]=1
-  ["mysql"]=1
-  ["sys"]=1
-)
 
-MYSQL_BIN="/usr/bin/mysql"
-MYSQLDUMP_BIN="/usr/bin/mysqldump"
+# Dynamically locate mysql and mysqldump binaries
+MYSQL_BIN=$(which mysql 2>/dev/null || echo "")
+MYSQLDUMP_BIN=$(which mysqldump 2>/dev/null || echo "")
+
+if [[ -z "$MYSQL_BIN" ]]; then
+  echo "Error: mysql binary not found in PATH" >&2
+  exit 1
+fi
+if [[ -z "$MYSQLDUMP_BIN" ]]; then
+  echo "Error: mysqldump binary not found in PATH" >&2
+  exit 1
+fi
 
 ########################################
 # CLI OPTIONS
@@ -74,8 +77,16 @@ done
 LOG_DIR="/var/log/mysql_protect"
 MAX_LOGS=${MAX_LOGS:-10}
 
-# Ensure /var/log log directory exists (best effort)
-mkdir -p "$LOG_DIR" 2>/dev/null || true
+# Ensure log directory exists and is writable, fallback to user-writable location
+if ! mkdir -p "$LOG_DIR" 2>/dev/null || [[ ! -w "$LOG_DIR" ]]; then
+  # Fallback to user-writable location
+  LOG_DIR="${HOME}/.mysql_protect/logs"
+  mkdir -p "$LOG_DIR" || {
+    # Last resort: use TMPDIR
+    LOG_DIR="${TMPDIR:-/tmp}/mysql_protect_logs"
+    mkdir -p "$LOG_DIR" || die "Cannot create log directory: $LOG_DIR"
+  }
+fi
 
 RUN_TS=$(date '+%Y%m%d_%H%M%S')
 RUN_ID="${RUN_TS}_$$"
@@ -87,7 +98,7 @@ LOG_BASENAME="mysql_protect_${RUN_ID}.log"
 LOG_PATH="${LOG_DIR}/${LOG_BASENAME}"
 
 # Create a new log file for this run (do not append to an existing one)
-: > "$LOG_PATH" 2>/dev/null || true
+: > "$LOG_PATH" || die "Cannot create log file: $LOG_PATH"
 
 # Keep only the most recent MAX_LOGS run logs, delete older ones
 LOG_INDEX=0
@@ -229,7 +240,10 @@ if [[ $DEBUG_ENABLED -eq 1 ]]; then
 fi
 
 is_excluded() {
-  [[ -n "${EXCLUDE_DBS[$1]:-}" ]]
+  case "$1" in
+    information_schema|performance_schema|mysql|sys) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 backup_database() {
@@ -270,20 +284,41 @@ if [[ ${#SPECIFIED_DBS[@]} -gt 0 ]]; then
   # Validate that specified databases exist
   log "INFO" "Validating specified databases"
   ALL_DBS=()
-  DB_OUTPUT=$(run_mysql -N -e "SHOW DATABASES;" 2>/dev/null) || { log "ERROR" "Unable to connect to MySQL" >&2; exit 1; }
+  MYSQL_ERR_FILE=$(mktemp)
+  trap - ERR
+  set +e
+  DB_OUTPUT=$(run_mysql -N -e "SHOW DATABASES;" 2>"$MYSQL_ERR_FILE")
+  mysql_rc=$?
+  set -e
+  trap 'on_error "$?" "$LINENO" "$BASH_COMMAND" "${FUNCNAME[0]:-main}"' ERR
+  MYSQL_ERROR=$(cat "$MYSQL_ERR_FILE" 2>/dev/null || echo "")
+  rm -f "$MYSQL_ERR_FILE"
+  # Filter out debug trace lines (starting with +) and extract only MySQL error messages
+  MYSQL_ERROR=$(echo "$MYSQL_ERROR" | grep -E "^ERROR" | head -1 || echo "$MYSQL_ERROR" | grep -v "^++\|^+" | grep -i error | head -1 || echo "$MYSQL_ERROR" | grep -v "^++\|^+" | head -1 || echo "$MYSQL_ERROR")
+  if [[ $mysql_rc -ne 0 ]] || [[ -z "$DB_OUTPUT" ]]; then
+    log "ERROR" "Unable to connect to MySQL"
+    log "ERROR" "Connection details: host=${MYSQL_HOST}, port=${MYSQL_PORT}, user=${MYSQL_USER}, socket=${MYSQL_SOCKET:-not set}"
+    [[ -n "$MYSQL_ERROR" ]] && log "ERROR" "MySQL error: $MYSQL_ERROR"
+    echo "Unable to connect to MySQL. Check connection parameters and MySQL server status." >&2
+    echo "Detailed error logged to: $LOG_PATH" >&2
+    exit 1
+  fi
   while IFS= read -r db; do
     [[ -n "$db" ]] && ALL_DBS+=("$db")
   done <<< "$DB_OUTPUT"
   
-  # Check if specified databases exist
-  declare -A DB_MAP
-  for db in "${ALL_DBS[@]}"; do
-    DB_MAP["$db"]=1
-  done
+  # Check if specified databases exist (bash 3.2 compatible)
+  db_exists() {
+    local search_db="$1"
+    for db in "${ALL_DBS[@]}"; do
+      [[ "$db" == "$search_db" ]] && return 0
+    done
+    return 1
+  }
   
   VALID_DBS=()
   for db in "${SPECIFIED_DBS[@]}"; do
-    if [[ -n "${DB_MAP[$db]:-}" ]]; then
+    if db_exists "$db"; then
       VALID_DBS+=("$db")
     else
       log "ERROR" "Database '$db' does not exist, skipping"
@@ -297,7 +332,25 @@ if [[ ${#SPECIFIED_DBS[@]} -gt 0 ]]; then
 else
   log "INFO" "Discovering MySQL databases"
   DATABASES=()
-  DB_OUTPUT=$(run_mysql -N -e "SHOW DATABASES;" 2>/dev/null) || { log "ERROR" "Unable to connect to MySQL" >&2; exit 1; }
+  MYSQL_ERR_FILE=$(mktemp)
+  trap - ERR
+  set +e
+  DB_OUTPUT=$(run_mysql -N -e "SHOW DATABASES;" 2>"$MYSQL_ERR_FILE")
+  mysql_rc=$?
+  set -e
+  trap 'on_error "$?" "$LINENO" "$BASH_COMMAND" "${FUNCNAME[0]:-main}"' ERR
+  MYSQL_ERROR=$(cat "$MYSQL_ERR_FILE" 2>/dev/null || echo "")
+  rm -f "$MYSQL_ERR_FILE"
+  # Filter out debug trace lines (starting with +) and extract only MySQL error messages
+  MYSQL_ERROR=$(echo "$MYSQL_ERROR" | grep -E "^ERROR" | head -1 || echo "$MYSQL_ERROR" | grep -v "^++\|^+" | grep -i error | head -1 || echo "$MYSQL_ERROR" | grep -v "^++\|^+" | head -1 || echo "$MYSQL_ERROR")
+  if [[ $mysql_rc -ne 0 ]] || [[ -z "$DB_OUTPUT" ]]; then
+    log "ERROR" "Unable to connect to MySQL"
+    log "ERROR" "Connection details: host=${MYSQL_HOST}, port=${MYSQL_PORT}, user=${MYSQL_USER}, socket=${MYSQL_SOCKET:-not set}"
+    [[ -n "$MYSQL_ERROR" ]] && log "ERROR" "MySQL error: $MYSQL_ERROR"
+    echo "Unable to connect to MySQL. Check connection parameters and MySQL server status." >&2
+    echo "Detailed error logged to: $LOG_PATH" >&2
+    exit 1
+  fi
   while IFS= read -r db; do
     [[ -n "$db" ]] && DATABASES+=("$db")
   done <<< "$DB_OUTPUT"
@@ -376,16 +429,17 @@ MYSQL_VARS=$(run_mysql -N -e "
 " 2>/dev/null | awk '{print $1"="substr($0, index($0,$2))}')
 log "INFO" "Retrieving MySQL variables, done"
 log "INFO" "Parsing MySQL variables"
-# Parse variables
-declare -A VAR_MAP
-while IFS='=' read -r key value; do
-  [[ -n "$key" && -n "$value" ]] && VAR_MAP["$key"]="$value"
-done <<< "$MYSQL_VARS"
+# Helper function to get MySQL variable value (bash 3.2 compatible)
+get_mysql_var() {
+  local var_name="$1"
+  echo "$MYSQL_VARS" | grep "^${var_name}=" | cut -d'=' -f2- | head -1
+}
 log "INFO" "Parsing MySQL variables, done"
 # Backup binlogs
 log "INFO" "Backing up binlogs"
-if [[ -n "${VAR_MAP[log_bin_basename]:-}" ]]; then
-  BINLOG_PATH=$(dirname "${VAR_MAP[log_bin_basename]}")
+BINLOG_BASENAME=$(get_mysql_var "log_bin_basename")
+if [[ -n "$BINLOG_BASENAME" ]]; then
+  BINLOG_PATH=$(dirname "$BINLOG_BASENAME")
   if [[ -d "$BINLOG_PATH" ]]; then
     cp -a "$BINLOG_PATH" "$BACKUP_DIR/logs/binlogs_${DATE}" 2>/dev/null && \
       log "OK" "Binlogs backed up" || \
@@ -400,7 +454,7 @@ log "INFO" "Backing up MySQL logs"
 LOG_VARS=("log_error" "slow_query_log_file" "general_log_file")
 BACKED_UP=0
 for var in "${LOG_VARS[@]}"; do
-  LOG_FILE="${VAR_MAP[$var]:-}"
+  LOG_FILE=$(get_mysql_var "$var")
   if [[ -n "$LOG_FILE" && -f "$LOG_FILE" ]]; then
     if cp "$LOG_FILE" "$BACKUP_DIR/logs/$(basename "$LOG_FILE")_${DATE}" 2>/dev/null; then
       ((BACKED_UP++))
