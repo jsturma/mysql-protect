@@ -1,6 +1,6 @@
 # MySQL Backup Script
 
-Simple bash script for backing up MySQL/MariaDB databases with support for parallel processing, compression, and comprehensive log management.
+Simple bash scripts for backing up MySQL/MariaDB databases and detecting MySQL environments. The backup script supports parallel processing, compression, and comprehensive log management. The environment detection script helps identify deployment types, privileges, and restrictions.
 
 ## Features
 
@@ -30,14 +30,15 @@ git clone <repository-url>
 cd mysql-protect
 ```
 
-2. Make the script executable:
+2. Make the scripts executable:
 ```bash
-chmod +x mysql_protect.sh
+chmod +x mysql_protect.sh mysql_detect_env.sh
 ```
 
 3. (Optional) Move to a system path:
 ```bash
 sudo mv mysql_protect.sh /usr/local/bin/mysql-protect
+sudo mv mysql_detect_env.sh /usr/local/bin/mysql-detect-env
 ```
 
 ## Usage
@@ -112,6 +113,77 @@ Usage: ./mysql_protect.sh [-h host] [-P port] [-s socket] [-D database1,database
 # Backup specific databases with parallel processing
 ./mysql_protect.sh -D myapp,mydb -j 4 -f
 ```
+
+## MySQL Environment Detection
+
+The repository includes `mysql_detect_env.sh`, a utility script to detect and analyze your MySQL environment. This is particularly useful for understanding deployment type, available privileges, and any restrictions.
+
+### Features
+
+- **Environment Detection**: Automatically detects AWS RDS, Azure Database, GCP Cloud SQL, Percona, MariaDB, and containerized deployments
+- **Container Detection**: Identifies Docker/Podman containers by analyzing hostname patterns and datadir paths
+- **Privilege Check**: Verifies SUPER privilege availability
+- **Environment-Specific Warnings**: Provides relevant guidance based on detected environment type
+
+### Usage
+
+```bash
+# Basic usage (uses defaults: 127.0.0.1:3306 as root)
+./mysql_detect_env.sh
+
+# With custom connection parameters
+MYSQL_HOST=192.168.1.100 MYSQL_USER=backup_user ./mysql_detect_env.sh
+
+# With password (or use .my.cnf)
+MYSQL_HOST=127.0.0.1 MYSQL_USER=root MYSQL_PASSWORD=mypassword ./mysql_detect_env.sh
+```
+
+### Example Output
+
+For a containerized MySQL instance:
+
+```
+🔍 Detecting MySQL environment...
+--------------------------------------
+Version           : 9.5.0
+Version comment   : MySQL Community Server - GPL
+Hostname          : ef0e77980304
+Datadir           : /var/lib/mysql/
+SUPER privilege   : YES
+Containerized     : YES (Container (Docker/Podman))
+
+🧠 Detected environment: MySQL Community (Container: Docker/Podman)
+--------------------------------------
+📦 Containerized environment detected:
+   - Full MySQL control available
+   - Streaming binlog OK
+   - Filesystem access limited to container
+   - Binlog files may need remote access (--read-from-remote-server)
+   - Consider volume mounts for persistent data
+
+✅ Detection completed
+```
+
+### Detected Environments
+
+- **AWS RDS**: Amazon RDS MySQL
+- **Azure Database for MySQL**: Azure PaaS offering
+- **GCP Cloud SQL**: Google Cloud SQL MySQL
+- **Percona Server**: Percona Server (VM/on-prem or container)
+- **MariaDB**: MariaDB (VM/on-prem or container)
+- **MySQL Community**: MySQL Community Server (VM/on-prem or container)
+
+### Environment Variables
+
+The detection script supports the same environment variables as the backup script:
+
+- `MYSQL_HOST`: MySQL host (default: 127.0.0.1)
+- `MYSQL_PORT`: MySQL port (default: 3306)
+- `MYSQL_USER`: MySQL user (default: root)
+- `MYSQL_PASSWORD`: MySQL password (default: empty, use .my.cnf recommended)
+- `MYSQL_SOCKET`: MySQL socket path (default: empty)
+- `ASSET_USERNAME`: Alternative username (for job-runner integration)
+- `ASSET_PASSWORD`: Alternative password (for job-runner integration)
 
 ## Configuration
 
